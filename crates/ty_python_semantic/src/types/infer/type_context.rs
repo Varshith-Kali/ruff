@@ -9,9 +9,11 @@ use crate::{Db, ProgramEnvironment};
     Default, Copy, Clone, Debug, PartialEq, Eq, Hash, get_size2::GetSize, salsa::SalsaValue,
 )]
 pub(in crate::types) enum TypeContextKind {
-    /// A direct declared type annotation.
-    #[default]
-    Declared,
+    /// An explicit declared type annotation.
+    ///
+    /// The annotation on an assignment can supply a preferred specialization for its right-hand
+    /// side. Expressions that receive their type context from that annotation inherit the preference.
+    AnnotatedAssignment,
 
     /// A constraint originating from inference evidence.
     ///
@@ -19,11 +21,15 @@ pub(in crate::types) enum TypeContextKind {
     /// type context for subsequent inference attempts during fixpoint iteration.
     Inferred,
 
-    /// The declared upper bound of a type variable.
+    /// A declared or inferred validity constraint.
     ///
-    /// Note that unlike a declared type, the upper bound of a type variable acts only as a validity
-    /// constraint, and does not provide a preferred specialization during generic call inference.
+    /// An expected type can supply a fallback for an unsolved type variable. A compatible
+    /// solution inferred from the call arguments takes precedence.
+    #[default]
     Validity,
+
+    /// A type variable's upper bound constrains solutions without supplying a fallback.
+    TypeVarBound,
 }
 
 /// The type context for a given expression, e.g., the type annotation
@@ -57,12 +63,13 @@ impl<'db> TypeContext<'db> {
         }
     }
 
-    pub(crate) fn declared(declared_type: Option<Type<'db>>) -> Self {
-        Self::new(declared_type, TypeContextKind::Declared)
+    pub(in crate::types) fn annotated_assignment(declared_type: Type<'db>) -> Self {
+        Self::new(Some(declared_type), TypeContextKind::AnnotatedAssignment)
     }
 
-    pub(crate) fn validity(declared_type: Type<'db>) -> Self {
-        Self::new(Some(declared_type), TypeContextKind::Validity)
+    /// Supplies a declared type as the expected type of an expression.
+    pub(crate) fn declared(declared_type: Option<Type<'db>>) -> Self {
+        Self::new(declared_type, TypeContextKind::Validity)
     }
 
     pub(in crate::types) fn declared_type(self) -> Option<Type<'db>> {
@@ -78,7 +85,10 @@ impl<'db> TypeContext<'db> {
     }
 
     pub(crate) fn is_validity(self) -> bool {
-        matches!(self.kind, TypeContextKind::Validity)
+        matches!(
+            self.kind,
+            TypeContextKind::Validity | TypeContextKind::TypeVarBound
+        )
     }
 
     /// If the declared type is a specialized instance of the given `KnownClass`, returns the

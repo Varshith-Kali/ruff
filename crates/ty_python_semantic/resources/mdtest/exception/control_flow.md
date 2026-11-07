@@ -67,10 +67,10 @@ def fallback() -> None:
         result: dict[str, Any] = could_raise_dict()
     except Exception:
         result = {"correct": False, "message": "fallback"}
-        reveal_type(result)  # revealed: dict[str, Any]
+        reveal_type(result)  # revealed: dict[str, bool | str]
 
-    reveal_type(result)  # revealed: dict[str, Any]
-    requires_str(result["message"])
+    reveal_type(result)  # revealed: dict[str, Any] | dict[str, bool | str]
+    requires_str(result["message"])  # error: [invalid-argument-type]
 ```
 
 The declaration also rejects an incompatible assignment in the handler.

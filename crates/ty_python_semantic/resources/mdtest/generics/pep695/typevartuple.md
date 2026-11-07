@@ -1422,20 +1422,29 @@ def positional_variadic(x: int, *args: str) -> tuple[int, *tuple[str, ...]]:
     raise NotImplementedError
 
 reveal_type(invoke(positional_only, 1, "a"))  # revealed: tuple[int, str]
+# error: [invalid-argument-type]
+reveal_type(invoke(positional_only))  # revealed: tuple[int, str]
 # TODO: Validate arguments matched to the variadic parameter against the `TypeVarTuple` inferred
 # from the callback.
-reveal_type(invoke(positional_only))  # revealed: tuple[int, str]
 reveal_type(invoke(positional_only, 1))  # revealed: tuple[int, str]
 reveal_type(invoke(positional_only, 1, 2))  # revealed: tuple[int, str]
 
 reveal_type(invoke(standard, 1, "a"))  # revealed: tuple[int, str]
 # error: [unknown-argument] "Argument `x` does not match any known parameter of function `invoke`"
 # error: [unknown-argument] "Argument `y` does not match any known parameter of function `invoke`"
+# error: [invalid-argument-type]
 reveal_type(invoke(standard, x=1, y="a"))  # revealed: tuple[int, str]
 
 reveal_type(invoke(positional_variadic, 1, "a", "b"))  # revealed: tuple[int, *tuple[str, ...]]
 reveal_type(invoke(positional_variadic, 1))  # revealed: tuple[int, *tuple[str, ...]]
+# error: [invalid-argument-type]
 reveal_type(invoke(positional_variadic))  # revealed: tuple[int, *tuple[str, ...]]
+
+def optional(value: int = 0, /) -> None: ...
+def variadic(*values: int) -> None: ...
+
+invoke(optional)  # ok
+invoke(variadic)  # ok
 
 def accept_forwarded[*Ts](callback: Callable[[*Ts], object], args: tuple[*Ts]) -> None: ...
 def forward[*Ts](callback: Callable[[*Ts], object], *args: *Ts) -> None:

@@ -4570,7 +4570,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             let value_ty = value.as_ref().map(|value| {
                 self.infer_maybe_standalone_expression(
                     value,
-                    TypeContext::declared(Some(annotated.inner_type())),
+                    TypeContext::annotated_assignment(annotated.inner_type()),
                 )
             });
 
@@ -4942,7 +4942,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
             let inferred_ty = self.infer_maybe_standalone_expression(
                 value,
-                TypeContext::declared(Some(declared.inner_type())),
+                TypeContext::annotated_assignment(declared.inner_type()),
             );
             let inferred_ty = if is_pep_613_type_alias && target.is_name_expr() {
                 // Alias type inference emits the diagnostic, but this runtime value is
@@ -6776,7 +6776,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             && let Some(peer_ty) = peer_ty
             && prefer_collection_literal_peer_context(db, env, tcx)
         {
-            TypeContext::declared(Some(peer_ty))
+            TypeContext::new(Some(peer_ty), super::TypeContextKind::Inferred)
         } else {
             return infer_expression(self, tcx);
         };
@@ -6917,9 +6917,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         expression: &ast::Expr,
         tcx: TypeContext<'db>,
     ) -> Type<'db> {
-        if let Some(target) = tcx.declared_type()
-            && let Some(ty) = self.infer_type_form_contextual_expression(expression, target)
-        {
+        if let Some(ty) = self.infer_type_form_contextual_expression(expression, tcx) {
             self.store_expression_type(expression, ty);
             return ty;
         }
@@ -7773,7 +7771,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 // first means a union whose arms all alias the same `TypedDict` reaches this
                 // branch rather than neither.
                 if let Some(ty) =
-                    self.infer_typed_dict_expression(dict, typed_dict, &mut item_types)
+                    self.infer_typed_dict_expression(dict, typed_dict, tcx, &mut item_types)
                 {
                     return ty;
                 }
@@ -7801,7 +7799,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     && !has_dict_compatible_fallback
                 {
                     if let Some(ty) =
-                        self.infer_typed_dict_expression(dict, *typed_dict, &mut item_types)
+                        self.infer_typed_dict_expression(dict, *typed_dict, tcx, &mut item_types)
                     {
                         return ty;
                     }
@@ -7814,9 +7812,12 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         // `TypedDict | dict[str, Any]` should remain quiet when the dict arm accepts
                         // the literal.
                         let mut builder = self.speculate();
-                        if let Some(inferred_ty) =
-                            builder.infer_typed_dict_expression(dict, typed_dict, &mut item_types)
-                        {
+                        if let Some(inferred_ty) = builder.infer_typed_dict_expression(
+                            dict,
+                            typed_dict,
+                            tcx,
+                            &mut item_types,
+                        ) {
                             narrowed.push((inferred_ty, builder));
                         }
 
@@ -7890,6 +7891,13 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         infer_elt_expression: &mut dyn FnMut(&mut Self, ArgExpr<'db, 'expr>) -> Type<'db>,
         tcx: TypeContext<'db>,
     ) -> Option<Type<'db>> {
+        // A type variable's upper bound can constrain inferred element types. An empty
+        // collection has no elements from which to infer a specialization.
+        let tcx = if elts.is_empty() && tcx.kind() == super::TypeContextKind::TypeVarBound {
+            TypeContext::default()
+        } else {
+            tcx
+        };
         self.infer_collection_with_union_context(tcx, |builder, tcx| {
             builder.infer_collection_literal_impl(
                 collection_class,
@@ -8146,6 +8154,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 .iter()
                 .any(|elts| matches!(elts.as_slice(), [None, Some(_)]));
 
+        // For validity context, compare the combined element type with the expected type
+        // after inference. For example, `[1]` can retain `list[int]` in a `list[Any]` context.
+        let prefer_elements =
+            tcx.is_validity() && !elt_tcx_constraints.is_empty() && !elts.is_empty();
         let mut pre_inferred_elt_tys = None;
 
         // Avoid projecting and solving a constraint set when contextual inference has already
@@ -8170,8 +8182,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 })
                 .collect::<Option<Vec<_>>>()
         {
-            // The slow path below adds the contextual specialization as an invariant mapping,
-            // then discards every element constraint that is already assignable to its context.
             // Infer the elements once here and retain their types so that a failed fast-path check
             // does not recursively re-infer nested collection literals on the slow path.
             let mut inferred_elts = Vec::with_capacity(elts.len());
@@ -8191,8 +8201,14 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         infer_elt_expression(self, (i, elt, tcx.with_declared_type(Some(elt_tcx))));
                     inferred_elt_tys[i] = Some(inferred_elt_ty);
 
-                    if !inferred_elt_ty.is_assignable_to(db, env, elt_tcx) {
-                        compatible = false;
+                    if compatible {
+                        compatible = if prefer_elements {
+                            // If each promoted element already has the expected type, solving
+                            // their combined constraints can only produce that specialization.
+                            inferred_elt_ty.promote(db, env) == elt_tcx
+                        } else {
+                            inferred_elt_ty.is_assignable_to(db, env, elt_tcx)
+                        };
                     }
                 }
                 inferred_elts.push(inferred_elt_tys);
@@ -8247,7 +8263,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             // literal elements directly. This violates the gradual guarantee (we don't know that
             // our inference is compatible with subsequent additions to the collection), but it
             // matches the behavior of other type checkers and is usually the desired behavior.
-            if let Some(elt_tcx) = elt_tcx {
+            if !prefer_elements && let Some(elt_tcx) = elt_tcx {
                 builder.add_type_mapping(elt_ty, elt_tcx, TypeVarVariance::Invariant);
             }
         }
@@ -8383,19 +8399,19 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     });
 
                 // Simplify the inference based on a non-covariant declared type.
-                if let Some(elt_tcx) =
-                    elt_tcx.filter(|_| !elt_tcx_variance[&elt_ty_identity].is_covariant())
+                if !prefer_elements
+                    && let Some(elt_tcx) =
+                        elt_tcx.filter(|_| !elt_tcx_variance[&elt_ty_identity].is_covariant())
                     && inferred_elt_ty.is_assignable_to(db, env, elt_tcx)
                 {
                     continue;
                 }
 
-                // A covariant context is an upper bound, so promotion must not widen an otherwise
-                // compatible element beyond that bound. In particular, promoting an exact float
-                // introduces `int`, which is not assignable to an exact-float context.
+                // Keep a compatible element within its expected type. For example, promoting an
+                // exact float introduces `int`, which falls outside an exact-float context.
                 let promoted_elt_ty = inferred_elt_ty.promote(db, env);
                 let inferred_elt_ty = if let Some(elt_tcx) = elt_tcx
-                    && elt_tcx_variance[&elt_ty_identity].is_covariant()
+                    && (prefer_elements || elt_tcx_variance[&elt_ty_identity].is_covariant())
                     && promoted_elt_ty != inferred_elt_ty
                     && !promoted_elt_ty.is_assignable_to(db, env, elt_tcx)
                     && inferred_elt_ty.is_assignable_to(db, env, elt_tcx)
@@ -8442,6 +8458,30 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         tuple_size_promotion_constraints.allow(current_typevar.identity(self.db())),
                         tcx.declared_type().is_none(),
                     );
+
+                    let identity = current_typevar.identity(db);
+                    if prefer_elements
+                        && let Some(&expected) = elt_tcx_constraints.get(&identity)
+                        && !elt_tcx_variance[&identity].is_covariant()
+                    {
+                        // Keep incompatible elements as evidence, including when the context
+                        // is only partially specialized, as in `list[int | T]`.
+                        if !lower.is_assignable_to(db, env, expected) {
+                            let incompatible = lower.filter_union(db, env, |ty| {
+                                !ty.is_assignable_to(db, env, expected)
+                            });
+                            return Some(UnionType::from_two_elements(
+                                db,
+                                env,
+                                expected,
+                                incompatible,
+                            ));
+                        }
+                        // Widen to the expected type unless the two are mutually assignable.
+                        if !expected.is_assignable_to(db, env, lower) {
+                            return Some(expected);
+                        }
+                    }
 
                     Some(lower)
                 })
@@ -9217,14 +9257,14 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         // return type as type context.
         let return_tcx = if let Some(signature) = callable_tcx {
             match signature.return_ty {
-                Type::Dynamic(DynamicType::Unknown) => TypeContext::declared(None),
+                Type::Dynamic(DynamicType::Unknown) => TypeContext::default(),
                 _ => tcx.with_declared_type(Some(signature.return_ty)),
             }
         } else {
             // TODO: Useful inference of a lambda's return type will require a different approach,
             // which does the inference of the body expression based on arguments at each call site,
             // rather than eagerly computing a return type without knowing the argument types.
-            TypeContext::declared(None)
+            TypeContext::default()
         };
 
         let inference = infer_scope_types(self.db(), scope, return_tcx);

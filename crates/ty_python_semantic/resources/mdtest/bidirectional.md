@@ -831,9 +831,53 @@ def forwarded[T](x: T, cond: bool) -> T | list[T]:
     return x if cond else [x]
 ```
 
-## Missing annotations do not supply declared type context
+## Type context without argument evidence
 
-A missing annotation does not supply type context for a return or argument expression:
+```toml
+[environment]
+python-version = "3.13"
+
+[rules]
+unsound-assignment = "error"
+unsound-return-statement = "error"
+```
+
+When the arguments do not determine a type variable, the expected type can supply a specialization.
+
+```py
+def empty[T]() -> T:
+    raise NotImplementedError
+
+def takes_int(value: int) -> None: ...
+
+takes_int(reveal_type(empty()))  # revealed: int
+```
+
+An empty `frozenset` can use the element type from an assignment or return annotation. Passing an
+iterable of `Any` supplies an element type, and the strict checks report that its values could
+include non-strings:
+
+```py
+from collections.abc import Iterable
+from typing import Any
+
+def assign(values: Iterable[Any]) -> None:
+    items: frozenset[str] = reveal_type(frozenset())  # revealed: frozenset[str]
+    items = frozenset()
+    reveal_type(items)  # revealed: frozenset[str]
+    items = frozenset(values)  # error: [unsound-assignment]
+
+def empty_set() -> frozenset[str]:
+    return frozenset()  # ok
+
+def from_items(items: Iterable[Any]) -> frozenset[str]:
+    return frozenset(items)  # error: [unsound-return-statement]
+```
+
+## Missing annotations
+
+A return or parameter annotated as `Unknown` preserves the type inferred from the argument, just as
+an unannotated one does:
 
 ```py
 from ty_extensions._internal import Unknown
@@ -845,10 +889,10 @@ def unannotated(x):
     return reveal_type(identity(1))  # revealed: Literal[1]
 
 def annotated(x: Unknown) -> Unknown:
-    return reveal_type(identity(1))  # revealed: Unknown
+    return reveal_type(identity(1))  # revealed: Literal[1]
 
 unannotated(reveal_type(identity(1)))  # revealed: Literal[1]
-annotated(reveal_type(identity(1)))  # revealed: Unknown
+annotated(reveal_type(identity(1)))  # revealed: Literal[1]
 ```
 
 ## Upper-bound type context
@@ -864,6 +908,18 @@ def bounded[T: list[int]](value: T) -> T:
 
 reveal_type(singleton(True))  # revealed: list[bool]
 reveal_type(bounded(singleton(True)))  # revealed: list[int]
+```
+
+A gradual element type in the bound preserves the element type inferred from the argument:
+
+```py
+from typing import Any
+
+def any_list[T: list[Any]](value: T) -> T:
+    return value
+
+reveal_type(any_list([1]))  # revealed: list[int]
+reveal_type(any_list(list((1,))))  # revealed: list[int]
 ```
 
 Declared upper bounds also restrict the range of an inferred gradual solution:
@@ -958,6 +1014,17 @@ def bounded_list[T: list[int]](value: T) -> T:
     return value
 
 reveal_type(bounded_list(empty_list()))  # revealed: list[Unknown]
+reveal_type(bounded_list([]))  # revealed: list[Unknown]
+reveal_type(bounded_list(list()))  # revealed: list[Unknown]
+```
+
+The implicit `cls` argument to `frozenset.__new__` supplies no evidence for the element type:
+
+```py
+def bounded_set[T: frozenset[str]](value: T) -> T:
+    return value
+
+reveal_type(bounded_set(frozenset()))  # revealed: frozenset[Unknown]
 ```
 
 The type variable remains unsolved when the upper-bound context passes through another generic call:
@@ -1364,31 +1431,31 @@ def _():
     x4 = two_lists_default(reveal_type([X()]), reveal_type([X()]))
     reveal_type(x4)  # revealed: X
 
-    # revealed: dict[X | int, Any]
-    # revealed: dict[X | str, Any]
+    # revealed: dict[X | int, X]
+    # revealed: dict[X | str, X]
     x5 = two_dicts(reveal_type(dct(X(), X())), reveal_type(dct(X(), X())))
     reveal_type(x5)  # revealed: X
 
-    # revealed: dict[X | int, Any]
-    # revealed: dict[X | str, Any]
+    # revealed: dict[X | int, X]
+    # revealed: dict[X | str, X]
     x6 = two_dicts(reveal_type({X(): X()}), reveal_type({X(): X()}))
     reveal_type(x6)  # revealed: X
 
-    # revealed: dict[X | int, Any]
-    # revealed: dict[X | str, Any]
+    # revealed: dict[X | int, X]
+    # revealed: dict[X | str, X]
     x7 = two_dicts_default(reveal_type(dct(X(), X())), reveal_type(dct(X(), X())))
     reveal_type(x7)  # revealed: X
 
-    # revealed: dict[X | int, Any]
-    # revealed: dict[X | str, Any]
+    # revealed: dict[X | int, X]
+    # revealed: dict[X | str, X]
     x8 = two_dicts_default(reveal_type({X(): X()}), reveal_type({X(): X()}))
     reveal_type(x8)  # revealed: X
 ```
 
 ## Declared type preference
 
-We prefer the declared solution of a given type variable if it is mutually assignable with the
-inferred solution.
+In an annotated assignment, we prefer the solution from the annotation if it is mutually assignable
+with the solution inferred from the arguments.
 
 ```py
 from typing import Any, reveal_type
@@ -1413,6 +1480,104 @@ Otherwise, the inferred solution is preferred, if it is compatible with the decl
 def _(number: int):
     x1: object = reveal_type(identity(number))  # revealed: int
     reveal_type(x1)  # revealed: int
+```
+
+On a later assignment, the value must satisfy the annotation. Its type can still narrow or widen as
+a result of the assignment:
+
+```py
+def _(dynamic: Any):
+    x: int = 0
+    x = identity(dynamic)
+    reveal_type(x)  # revealed: Any
+    x = "invalid"  # error: [invalid-assignment]
+```
+
+This also applies when reassigning a function parameter. Converting the rows to tuples is valid even
+though the parameter accepts other sequences:
+
+```py
+from collections.abc import Sequence
+
+def freeze(rows: Sequence[Sequence[int]]) -> tuple[tuple[int, ...], ...]:
+    rows = tuple(map(tuple, rows))
+    return rows
+```
+
+An annotation on the result of a call can propagate to a nested call through a shared type variable.
+A parameter whose type is independent of the result only constrains its argument:
+
+```py
+def get_item[T](items: list[T], index: int) -> T:
+    return items[index]
+
+def _(items: list[Any], index: Any):
+    item: int = get_item(
+        reveal_type(identity(items)),  # revealed: list[int]
+        reveal_type(identity(index)),  # revealed: Any
+    )
+```
+
+A specialization from the assignment can also be more precise than a type variable's upper bound:
+
+```py
+def number[T: int](value: T) -> T:
+    return value
+
+def _(value: Any):
+    result: bool = number(reveal_type(identity(value)))  # revealed: bool
+```
+
+If only part of a parameter type comes from the assignment, the entire parameter supplies validity
+context. Here the assignment solves `T` and the parameter supplies `str`:
+
+```py
+def first_item[T](pair: tuple[T, str]) -> T:
+    return pair[0]
+
+def _(value: Any):
+    item: int = first_item((
+        reveal_type(identity(value)),  # revealed: Any
+        reveal_type(identity(value)),  # revealed: Any
+    ))
+```
+
+A collection literal passed to a function can retain its element type when the parameter accepts any
+element type:
+
+```py
+def takes_list(items: list[Any]) -> None: ...
+
+takes_list(reveal_type([1]))  # revealed: list[int]
+```
+
+We compare the type inferred from all the elements to the expected element type. Here `int | Any` is
+mutually assignable with `int | str`.
+
+```py
+def takes_union(items: list[int | str]) -> None: ...
+def _(dynamic: Any):
+    takes_union(reveal_type([1, dynamic]))  # revealed: list[int | Any]
+```
+
+The list of constructors widens to its declared element type, which also admits ordinary functions.
+
+```py
+from collections.abc import Callable
+
+class Conv:
+    def __init__(self, *, kernel_size: int): ...
+
+class Aux: ...
+
+def build():
+    blocks: list[Callable[..., object]]
+    blocks = [Conv, Aux]
+    reveal_type(blocks[0])  # revealed: (...) -> object
+    blocks[0](kernel_size=7)  # ok
+
+    # error: [invalid-assignment]
+    blocks = reveal_type([Conv, Aux, 1])  # revealed: list[((...) -> object) | int]
 ```
 
 The same declared type heuristic applies when inferring the specialization of a generic class:
@@ -2403,6 +2568,37 @@ class Callbacks:
     def __init__(self):
         self.values = [{"x": 0}, {"x": lambda x: 0}]
         self.identities = [{"x": 0}, {"x": lambda x: x}]
+```
+
+An inferred attribute type does not provide a declared type preference to later assignments:
+
+```py
+def identity[T](value: T) -> T:
+    return value
+
+class Fields:
+    class_value = None
+
+    def __init__(self, value: Any):
+        self.value = None
+        self.value = identity(value)
+        reveal_type(self.value)  # revealed: Any
+
+def _(value: Any):
+    Fields.class_value = reveal_type(identity(value))  # revealed: Any
+    reveal_type(Fields.class_value)  # revealed: Any
+```
+
+When an attribute has an explicit annotation, the preference applies to the initializer:
+
+```py
+class Annotated:
+    def __init__(self, value: Any):
+        self.value: int = identity(value)
+        reveal_type(self.value)  # revealed: int
+
+        self.value = identity(value)
+        reveal_type(self.value)  # revealed: Any
 ```
 
 ## Overload evaluation

@@ -15,8 +15,7 @@ dependencies = ["numpy==2.4.6"]
 import numpy as np
 
 xs = np.array([1, 2, 3])
-# TODO: should be `ndarray[tuple[Any, ...], dtype[Any]]`
-reveal_type(xs)  # revealed: ndarray[tuple[Any, ...], dtype[Unknown]]
+reveal_type(xs)  # revealed: ndarray[tuple[Any, ...], dtype[Any]]
 
 xs = np.array([1.0, 2.0, 3.0], dtype=np.float64)
 reveal_type(xs)  # revealed: ndarray[tuple[Any, ...], dtype[float64]]
@@ -47,6 +46,13 @@ reveal_type(values)  # revealed: ndarray[tuple[Any, ...], dtype[signedinteger[_6
 
 interpolated = np.interp(values, values, values)
 reveal_type(interpolated)  # revealed: ndarray[tuple[Any, ...], dtype[float64]]
+```
+
+Passing list literals directly to `interp` also preserves their integer element type when selecting
+the overload:
+
+```py
+reveal_type(np.interp([0, 1], [1, 2], [0, 2]))  # revealed: ndarray[tuple[int], dtype[float64]]
 ```
 
 ## Iterating over an array union

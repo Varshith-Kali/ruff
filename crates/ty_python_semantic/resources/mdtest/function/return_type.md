@@ -822,18 +822,12 @@ def generator_never_returns() -> Generator[None, None, Never]:
     return returns_any()  # error: [unsound-return-statement]
 ```
 
-There is currently a limitation in how this rule interacts with contextual inference for collection
-literals. When a function is annotated as returning `list[int]`, the annotation is used as context
-while inferring the type of a list literal in a `return` statement. As a result, a list literal
-containing an `Any` value is inferred as `list[int]` rather than `list[Any]`. The rule therefore
-does not emit a diagnostic for the following unsound return statement. Mypy's `--warn-return-any`
-option has the same limitation. In fact, mypy only rejects return expressions whose entire type is
-`Any`, whereas this rule also rejects an independently inferred `list[Any]` when the annotated
-return type is `list[int]`:
+A list literal with an `Any` element retains the type `list[Any]` in a return statement. Its
+elements may therefore violate the annotated return type:
 
 ```py
 def returns_list_containing_any() -> list[int]:
-    return [returns_any()]
+    return [returns_any()]  # error: [unsound-return-statement]
 ```
 
 ## Regression test: `unsound-return-statement` with gradual generic declarations

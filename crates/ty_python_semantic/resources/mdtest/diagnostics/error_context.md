@@ -560,10 +560,8 @@ info: Function signature here
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ```
 
-The following examples use a `TypeVarTuple` instead of a `ParamSpec`. In this case, we forward the
-specialization of the outer `TypeVarTuple` to the inner call, and so report `callback3` as being
-incompatible with the signature of `wrapper3`, instead of the provided arguments being incompatible
-with the signature of `accept3`.
+The following example uses a `TypeVarTuple`. Passing no extra arguments to `accept3` requires a
+callback that accepts no arguments, but `wrapper3(callback3)` requires one integer.
 
 ```py
 def wrapper3[*Ts](fn: Callable[[*Ts], None]) -> Callable[[*Ts], None]:
@@ -576,16 +574,18 @@ accept3(wrapper3(callback3))  # snapshot: invalid-argument-type
 ```
 
 ```snapshot
-error[invalid-argument-type]: Argument to function `wrapper3` is incorrect
-  --> src/mdtest_snippet.py:23:18
+error[invalid-argument-type]: Argument to function `accept3` is incorrect
+  --> src/mdtest_snippet.py:23:9
    |
 23 | accept3(wrapper3(callback3))  # snapshot: invalid-argument-type
-   |                  ^^^^^^^^^ Expected `(*int) -> None`, found `def callback3(value: int) -> None`
+   |         ^^^^^^^^^^^^^^^^^^^ Expected `() -> None`, found `(int, /) -> None`
+info: unexpected extra parameter
+help: The parameter must have a default value
 info: Function defined here
-  --> src/mdtest_snippet.py:17:5
+  --> src/mdtest_snippet.py:20:5
    |
-17 | def wrapper3[*Ts](fn: Callable[[*Ts], None]) -> Callable[[*Ts], None]:
-   |     ^^^^^^^^      ------------------------- Parameter declared here
+20 | def accept3[*Ts](fn: Callable[[*Ts], None], *args: *Ts) -> None: ...
+   |     ^^^^^^^      ------------------------- Parameter declared here
 ```
 
 ```py

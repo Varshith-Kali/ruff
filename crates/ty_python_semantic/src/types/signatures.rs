@@ -1602,7 +1602,7 @@ impl<'db> Signature<'db> {
             receiver_constraint.as_ref(),
         );
         if let Some(self_type) = typing_self_type
-            && self.needs_self_mapping(db, env, parameters.as_slice())
+            && Self::needs_self_mapping(db, env, self.return_ty, parameters.as_slice())
         {
             let self_mapping = self_mapping(self_type);
             parameters = parameters.apply_type_mapping_impl(
@@ -1894,6 +1894,7 @@ impl<'db> Signature<'db> {
         &self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
+        return_ty: Type<'db>,
     ) -> Option<BoundTypeVarInstance<'db>> {
         let (receiver, parameters) = self.parameters.as_slice().split_first()?;
         let typevar = match receiver.annotated_type() {
@@ -1903,7 +1904,7 @@ impl<'db> Signature<'db> {
         };
         (receiver.is_positional()
             && typevar.typevar(db).is_self(db)
-            && !self.needs_self_mapping(db, env, parameters))
+            && !Self::needs_self_mapping(db, env, return_ty, parameters))
         .then_some(typevar)
     }
 
@@ -1917,7 +1918,7 @@ impl<'db> Signature<'db> {
         if context.len(db) != 1 || !self.has_implicit_positional_receiver_annotation() {
             return None;
         }
-        let self_typevar = self.unused_self_typevar(db, env)?;
+        let self_typevar = self.unused_self_typevar(db, env, self.return_ty)?;
         if !context.contains(db, self_typevar.identity(db)) {
             return None;
         }
@@ -1935,18 +1936,22 @@ impl<'db> Signature<'db> {
         Some(signature)
     }
 
-    /// Binds the `Self` receiver if it is unused in the rest of the signature.
-    ///
-    /// This is purely a performance optimization. Eagerly binding the type of `Self` prevents
-    /// unnecessary work from being performed by the constraint solver.
-    pub(super) fn bind_unused_self(
+    /// Binds a constructor's `Self` receiver when the other parameters do not depend on it.
+    pub(super) fn bind_constructor_self(
         &self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
         self_type: Type<'db>,
     ) -> Option<Self> {
         let context = self.generic_context?;
-        let self_typevar = self.unused_self_typevar(db, env)?;
+        // A `__new__` returning `Self` uses the constructed instance as its effective return
+        // type. Leaving `Self` inferable makes the implicit `cls` argument contribute evidence
+        // for otherwise unsolved class type variables, as in `frozenset()`.
+        let return_ty = match self.return_ty.resolve_type_alias(db) {
+            Type::TypeVar(var) if var.typevar(db).is_self(db) => self_type,
+            _ => self.return_ty,
+        };
+        let self_typevar = self.unused_self_typevar(db, env, return_ty)?;
 
         // Also ensure that the receiver satisfies the upper bound of `Self`.
         let bound = self_typevar.typevar(db).upper_bound(db, env)?;
@@ -1985,12 +1990,15 @@ impl<'db> Signature<'db> {
 
         let mapping =
             TypeMapping::ApplySpecialization(ApplySpecialization::Single(self_typevar, self_type));
-        Some(self.apply_type_mapping_impl(
+        let signature = self.apply_type_mapping_impl(
             db,
             &mapping,
             TypeContext::default(),
             &ApplyTypeMappingVisitor::new(env),
-        ))
+        );
+        // Constructor return-type projection uses the original `Self` to preserve a narrowed
+        // class object's type, for example `type[T] & type[Child]`.
+        Some(signature.with_return_type(self.return_ty))
     }
 
     fn apply_self_with_receiver(
@@ -2028,7 +2036,7 @@ impl<'db> Signature<'db> {
                     inferable,
                 )
             });
-        if !self.needs_self_mapping(db, env, self.parameters.as_slice()) {
+        if !Self::needs_self_mapping(db, env, self.return_ty, self.parameters.as_slice()) {
             return Self {
                 extras: SignatureExtras::new(
                     self.source_overload_index_raw(),
@@ -2284,12 +2292,12 @@ impl<'db> Signature<'db> {
     }
 
     fn needs_self_mapping(
-        &self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
+        return_ty: Type<'db>,
         parameters: &[Parameter<'db>],
     ) -> bool {
-        self.return_ty.contains_self(db, env)
+        return_ty.contains_self(db, env)
             || parameters
                 .iter()
                 .any(|parameter| parameter.annotated_type().contains_self(db, env))

@@ -28,7 +28,7 @@ impl<'db> CallableBinding<'db> {
         self_type: Type<'db>,
     ) {
         for overload in &mut self.overloads {
-            if let Some(signature) = overload.signature.bind_unused_self(db, env, self_type) {
+            if let Some(signature) = overload.signature.bind_constructor_self(db, env, self_type) {
                 overload.signature = signature;
                 overload.return_ty = overload.initial_return_type(db);
             }
