@@ -1866,10 +1866,15 @@ impl<'db> Signature<'db> {
             .is_always_satisfied(db, env, inferable)
     }
 
-    pub(crate) fn has_explicit_positional_receiver_annotation(&self) -> bool {
+    pub(super) fn explicit_positional_receiver_annotation(&self) -> Option<Type<'db>> {
         self.parameters
-            .get(0)
-            .is_some_and(|parameter| parameter.is_positional() && !parameter.inferred_annotation)
+            .get_positional(0)
+            .filter(|parameter| !parameter.inferred_annotation)
+            .map(Parameter::annotated_type)
+    }
+
+    pub(crate) fn has_explicit_positional_receiver_annotation(&self) -> bool {
+        self.explicit_positional_receiver_annotation().is_some()
     }
 
     /// Returns whether the receiver can determine a method type variable used elsewhere.

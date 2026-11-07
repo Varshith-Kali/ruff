@@ -8296,6 +8296,17 @@ impl<'db> Type<'db> {
                 for binding in bindings.iter_flat_mut() {
                     if let Some(self_type) = binding.typing_self_type(db) {
                         binding.bind_unused_self(db, env, self_type);
+                        if matches!(self, Type::ClassLiteral(_))
+                            && binding.bound_type == Some(constructor_instance_ty)
+                            && let Some(context) = class_generic_context
+                        {
+                            binding.apply_init_self_annotation(
+                                db,
+                                env,
+                                constructor_instance_ty,
+                                context,
+                            );
+                        }
                     }
                 }
                 bindings
