@@ -26,10 +26,9 @@ impl<'db> CallableBinding<'db> {
         &mut self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
-        instance: Type<'db>,
         class_context: GenericContext<'db>,
     ) {
-        let Some(constructed) = instance.as_nominal_instance() else {
+        let Some(instance @ Type::NominalInstance(constructed)) = self.bound_type else {
             return;
         };
         for overload in &mut self.overloads {
@@ -512,16 +511,14 @@ impl<'db> ConstructorBinding<'db> {
                         (*partial != Type::Dynamic(DynamicType::UnspecializedTypeVar))
                             .then_some(*resolved)
                     })
-                    .collect::<Vec<_>>()
             };
-            let project_class_arguments =
-                |ty: Type<'db>, resolved_ty: Type<'db>| -> Option<Vec<Option<Type<'db>>>> {
-                    let partial = ty
-                        .apply_optional_specialization(db, partial_specialization)
-                        .specialization_of(db, env, class_literal)?;
-                    let resolved = resolved_ty.specialization_of(db, env, class_literal)?;
-                    Some(inferred_types(partial, resolved))
-                };
+            let project_class_arguments = |ty: Type<'db>, resolved_ty: Type<'db>| {
+                let partial = ty
+                    .apply_optional_specialization(db, partial_specialization)
+                    .specialization_of(db, env, class_literal)?;
+                let resolved = resolved_ty.specialization_of(db, env, class_literal)?;
+                Some(inferred_types(partial, resolved))
+            };
             let return_types = if explicit_return.is_some() {
                 // The caller applies these bindings to the return annotation. Infer them in
                 // declaration order so an annotation like `Pair[U, T]` swaps the arguments once.
@@ -560,7 +557,7 @@ impl<'db> ConstructorBinding<'db> {
                     };
                 }
             } else {
-                combined = Some(types);
+                combined = Some(types.collect());
             }
         };
 

@@ -1179,20 +1179,21 @@ class Field[S, T]:
 field: Field[bool, bool | None] = Field()
 reveal_type(field)  # revealed: Field[bool | None, bool | None]
 
-# error: [invalid-assignment] "Object of type `Field[bool | None, bool | None]` is not assignable to `Field[bool, bool]`"
+# error: [invalid-assignment] "Object of type `Field[bool | None, bool | None]`"
 narrow: Field[bool, bool] = Field()
 ```
 
-The inherited initializer fixes the read type. The assignment can still supply the label type
-introduced by the subclass.
+Even inside a method of the subclass, the inherited initializer fixes the read type and the
+assignment can supply the label type for the new instance.
 
 ```py
 class LabeledField[T, U](Field[object, T]):
     label: U
 
-# revealed: LabeledField[bool | None, str]
-field_with_label: LabeledField[bool | None, str] = reveal_type(LabeledField())
-narrow_read: LabeledField[bool, str] = LabeledField()  # error: [invalid-assignment]
+    def example(self):
+        # revealed: LabeledField[bool | None, str]
+        field: LabeledField[bool | None, str] = reveal_type(LabeledField())
+        narrow: LabeledField[bool, str] = LabeledField()  # error: [invalid-assignment]
 ```
 
 ### Class-scoped type variables in `__init__` receiver annotations
@@ -1270,11 +1271,7 @@ class Remapped[T]:
     def __init__[V](self: "Remapped[list[V]]", value: V) -> None: ...
 
 reveal_type(Remapped(1))  # revealed: Remapped[list[int]]
-```
 
-An inherited initializer applies the same specialization to the subclass.
-
-```py
 class Child[T](Remapped[T]): ...
 
 reveal_type(Child(1))  # revealed: Child[list[int]]
