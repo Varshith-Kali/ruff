@@ -7,8 +7,9 @@ any scope. Final names declared in class scopes cannot be overridden in subclass
 
 ### `Final` with type
 
-Declared symbols that are additionally qualified with `Final` use the declared type when accessed
-from another scope. Local uses of the symbol will use the inferred type, which may be more specific:
+A symbol annotated with `Final[T]` uses its declared type when accessed from another scope. A local
+read can narrow to the assigned value. An explicit `Final[Unknown]` keeps the declared `Unknown` on
+the annotated assignment, while a bare `Final` takes its type from the value.
 
 `mod.py`:
 
@@ -22,14 +23,16 @@ FINAL_C: Final[Annotated[int, "the annotation for FINAL_C"]] = 1
 FINAL_D: "Final[int]" = 1
 FINAL_F: Final[int]
 FINAL_F = 1
-HEADER: Final[Unknown] = b""
+FINAL_G: Final[Unknown] = b""
+FINAL_H: Final = b""
 
 reveal_type(FINAL_A)  # revealed: Literal[1]
 reveal_type(FINAL_B)  # revealed: Literal[1]
 reveal_type(FINAL_C)  # revealed: Literal[1]
 reveal_type(FINAL_D)  # revealed: Literal[1]
-reveal_type(FINAL_D)  # revealed: Literal[1]
-reveal_type(HEADER)  # revealed: Unknown
+reveal_type(FINAL_F)  # revealed: Literal[1]
+reveal_type(FINAL_G)  # revealed: Unknown
+reveal_type(FINAL_H)  # revealed: Literal[b""]
 
 def nonlocal_uses():
     reveal_type(FINAL_A)  # revealed: int
@@ -37,18 +40,22 @@ def nonlocal_uses():
     reveal_type(FINAL_C)  # revealed: int
     reveal_type(FINAL_D)  # revealed: int
     reveal_type(FINAL_F)  # revealed: int
+    reveal_type(FINAL_G)  # revealed: Unknown
+    reveal_type(FINAL_H)  # revealed: Literal[b""]
 ```
 
 Imported types:
 
 ```py
-from mod import FINAL_A, FINAL_B, FINAL_C, FINAL_D, FINAL_F
+from mod import FINAL_A, FINAL_B, FINAL_C, FINAL_D, FINAL_F, FINAL_G, FINAL_H
 
 reveal_type(FINAL_A)  # revealed: int
 reveal_type(FINAL_B)  # revealed: int
 reveal_type(FINAL_C)  # revealed: int
 reveal_type(FINAL_D)  # revealed: int
 reveal_type(FINAL_F)  # revealed: int
+reveal_type(FINAL_G)  # revealed: Unknown
+reveal_type(FINAL_H)  # revealed: Literal[b""]
 ```
 
 ### Bare `Final` without a type
@@ -63,10 +70,10 @@ symbol cannot be modified:
 from typing import Final
 
 FINAL_A: Final = 1
-HEADER: Final = bytes.fromhex("fd")
+FINAL_B: Final = bytes.fromhex("fd")
 
 reveal_type(FINAL_A)  # revealed: Literal[1]
-reveal_type(HEADER)  # revealed: bytes
+reveal_type(FINAL_B)  # revealed: bytes
 
 def nonlocal_uses():
     reveal_type(FINAL_A)  # revealed: Literal[1]
@@ -94,7 +101,7 @@ class C:
         self.FINAL_D: Final = 1
         self.FINAL_E: Final
         self.FINAL_E = 1
-        self.header: Final = reveal_type(bytes.fromhex("fd"))  # revealed: bytes
+        self.FINAL_F: Final = reveal_type(bytes.fromhex("fd"))  # revealed: bytes
 
 reveal_type(C.FINAL_A)  # revealed: int
 reveal_type(C.FINAL_B)  # revealed: Literal[1]
