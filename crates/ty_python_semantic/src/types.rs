@@ -12031,7 +12031,7 @@ impl<'db, T: Copy> TypeAndQualifiers<'db, T> {
 
     /// The type that can guide inference of the assigned value. For example, the recovery
     /// type `list[Unknown]` from `list[42]` is usable only for reads and validation.
-    pub(crate) fn binding_type(self) -> Option<Type<'db>>
+    fn binding_type(self) -> Option<Type<'db>>
     where
         T: Into<Option<Type<'db>>>,
     {
