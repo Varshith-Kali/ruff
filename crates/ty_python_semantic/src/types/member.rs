@@ -1,12 +1,10 @@
 use crate::Db;
 use crate::place::{
-    ConsideredDefinitions, DefinedPlace, Place, PlaceAndQualifiers, PublicTypePolicy,
-    RequiresExplicitReExport, TypeOrigin, place_by_id, place_from_bindings,
-    place_from_declarations,
+    ConsideredDefinitions, DefinedPlace, Place, PlaceAndQualifiers, RequiresExplicitReExport,
+    TypeOrigin, place_by_id, place_from_bindings, place_from_declarations,
 };
 use crate::types::{
-    ProgramEnvironment, StaticClassLiteral, Type, UnionType, class::MroLookup,
-    infer::nearest_enclosing_class,
+    ProgramEnvironment, StaticClassLiteral, Type, class::MroLookup, infer::nearest_enclosing_class,
 };
 use ty_python_core::{
     place_table, scope::ScopeId, semantic_index, symbol::ScopedSymbolId, use_def_map,
@@ -101,13 +99,6 @@ pub(super) fn class_member_with_symbol<'db>(
                         public_type_policy: declared.public_type_policy,
                         ..*place
                     };
-                } else if inherited.member.is_class_var()
-                    && place_table(db, scope).symbol(symbol_id).name() != "__hash__"
-                {
-                    // A bare inherited `ClassVar` leaves the subclass's binding open to reassignment.
-                    let env = ProgramEnvironment::from_scope(scope);
-                    place.ty = UnionType::from_two_elements(db, &env, Type::unknown(), place.ty);
-                    place.public_type_policy = PublicTypePolicy::Raw;
                 }
                 place_and_quals.qualifiers = inherited.member.qualifiers;
             }

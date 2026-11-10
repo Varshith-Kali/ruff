@@ -1358,54 +1358,23 @@ pub(crate) fn place_by_id<'db>(
         ConsideredDefinitions::AllReachable => use_def.reachable_bindings(place_id),
     };
 
-    if let Some(declaration @ DefinedPlace { ty: None, .. }) = declared.place {
-        let binding = place_from_bindings_impl(
-            db,
-            &env,
-            all_considered_bindings(),
-            requires_explicit_reexport,
-            None,
-        )
-        .place;
-        if declared.qualifiers().contains(TypeQualifiers::FINAL) {
-            // A bare `Final` keeps its inferred type because it cannot be reassigned.
-            return binding.with_qualifiers(declared.qualifiers());
-        }
-
-        // A bare `ClassVar` can also receive values of other types through the class.
-        let place = match binding {
-            Place::Defined(binding) => Place::Defined(DefinedPlace {
-                ty: UnionType::from_two_elements(db, &env, Type::unknown(), binding.ty),
-                provenance: binding.provenance.or(declaration.provenance),
-                ..binding
-            }),
-            Place::Undefined => Place::Defined(declaration.with_type(Type::unknown())),
-        };
-        return place.with_qualifiers(declared.qualifiers());
-    }
-
-    match declared.ignore_conflicting_declarations() {
-        // Place is declared, trust the declared type
-        place_and_quals @ PlaceAndQualifiers {
-            place:
-                Place::Defined(DefinedPlace {
-                    definedness: Definedness::AlwaysDefined,
-                    ..
-                }),
-            qualifiers: _,
-        } => place_and_quals,
+    let qualifiers = declared.qualifiers();
+    match declared.place {
+        Some(
+            declaration @ DefinedPlace {
+                ty: Some(ty),
+                definedness: Definedness::AlwaysDefined,
+                ..
+            },
+        ) => Place::Defined(declaration.with_type(ty)).with_qualifiers(qualifiers),
         // Place is possibly declared
-        PlaceAndQualifiers {
-            place:
-                Place::Defined(DefinedPlace {
-                    ty: declared_ty,
-                    origin,
-                    definedness: Definedness::PossiblyUndefined,
-                    provenance: declared_provenance,
-                    ..
-                }),
-            qualifiers,
-        } => {
+        Some(DefinedPlace {
+            ty: Some(declared_ty),
+            origin,
+            definedness: Definedness::PossiblyUndefined,
+            provenance: declared_provenance,
+            ..
+        }) => {
             let bindings = all_considered_bindings();
             let boundness_analysis = bindings.boundness_analysis();
             let inferred =
@@ -1447,16 +1416,26 @@ pub(crate) fn place_by_id<'db>(
 
             PlaceAndQualifiers { place, qualifiers }
         }
-        // Place is undeclared, infer the type from bindings
-        PlaceAndQualifiers {
-            place: Place::Undefined,
-            qualifiers,
-        } => {
+        // Without a declared type, infer the public type from bindings.
+        declaration => {
             let bindings = all_considered_bindings();
             let boundness_analysis = bindings.boundness_analysis();
             let mut inferred =
                 place_from_bindings_impl(db, &env, bindings, requires_explicit_reexport, None)
                     .place;
+
+            if let Some(declaration) = declaration {
+                if qualifiers.contains(TypeQualifiers::FINAL) {
+                    // A bare `Final` keeps its inferred literal type.
+                    return inferred.with_qualifiers(qualifiers);
+                }
+                // A bare `ClassVar` can declare a member before any value is available.
+                let Place::Defined(binding) = &mut inferred else {
+                    return Place::Defined(declaration.with_type(Type::unknown()))
+                        .with_qualifiers(qualifiers);
+                };
+                binding.provenance = binding.provenance.or(declaration.provenance);
+            }
 
             if boundness_analysis == BoundnessAnalysis::AssumeBound {
                 if let Place::Defined(defined) = inferred {
@@ -2222,9 +2201,9 @@ impl<'db> DeclaredTypeBuilder<'db> {
         // cannot guide binding inference for every path reaching that assignment.
         self.origin = self.origin.merge(element.origin());
         let Some(element_ty) = element.inner_type() else {
-            // A qualifier-only branch leaves the public type open even when another branch
-            // specifies a type, but it cannot conflict with that declaration.
-            self.inner.add(Type::unknown(), reachability);
+            if element.qualifiers().contains(TypeQualifiers::FINAL) {
+                self.inner.add(Type::unknown(), reachability);
+            }
             return;
         };
         self.has_declared_type = true;
@@ -2295,6 +2274,7 @@ fn place_from_declarations_impl<'db>(
     let mut first_declaration = None;
     let mut provenance = Provenance::Unknown;
     let mut all_declarations_definitely_reachable = true;
+    let mut has_bare_class_var = false;
 
     let mut types = declarations.filter_map(|declaration_with_constraint| {
         let DeclarationWithConstraint {
@@ -2323,6 +2303,8 @@ fn place_from_declarations_impl<'db>(
             None
         } else {
             let declared_type = inferred_declaration(db, declaration).declared()?;
+            has_bare_class_var |= declared_type.inner_type().is_none()
+                && !declared_type.qualifiers().contains(TypeQualifiers::FINAL);
             first_declaration.get_or_insert(declaration);
             provenance = provenance.or(Provenance::SingleDefinition(declaration));
             all_declarations_definitely_reachable =
@@ -2345,7 +2327,13 @@ fn place_from_declarations_impl<'db>(
             (first, None)
         };
 
-        let boundness = boundness_evaluator.evaluate(db, all_declarations_definitely_reachable);
+        // A bare `ClassVar` on one path supplies only a qualifier. If another path declares
+        // a type, public lookup also needs the bindings from the path without a declared type.
+        let boundness = if has_bare_class_var && declared.inner_type().is_some() {
+            Definedness::PossiblyUndefined
+        } else {
+            boundness_evaluator.evaluate(db, all_declarations_definitely_reachable)
+        };
 
         PlaceFromDeclarationsResult {
             place: Some(
