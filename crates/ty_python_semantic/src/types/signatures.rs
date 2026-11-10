@@ -995,15 +995,9 @@ impl<'db> Signature<'db> {
             .is_some_and(|extras| extras.is_paramspec_value)
     }
 
-    /// Return a signature for a dynamic callable
-    pub(crate) fn dynamic(signature_type: Type<'db>) -> Self {
-        Signature {
-            generic_context: None,
-            definition: None,
-            extras: None,
-            parameters: Parameters::gradual_form(),
-            return_ty: signature_type,
-        }
+    /// A dynamically callable value accepts arbitrary arguments without providing their types.
+    pub(crate) fn dynamic(return_ty: Type<'db>) -> Self {
+        Self::new(Parameters::unknown(), return_ty)
     }
 
     /// Return a typed signature from a function definition.
@@ -1102,7 +1096,7 @@ impl<'db> Signature<'db> {
 
     /// Returns the signature which accepts any parameters and returns an `Unknown` type.
     pub(crate) fn unknown() -> Self {
-        Self::new(Parameters::unknown(), Type::unknown())
+        Self::dynamic(Type::unknown())
     }
 
     /// Return the "bottom" signature, subtype of all other fully-static signatures.
@@ -6421,12 +6415,7 @@ impl<'db> Parameter<'db> {
     }
 
     pub(super) fn argument_context_type(&self) -> Option<Type<'db>> {
-        // The fallback `Unknown` for a missing annotation provides no context for an argument.
-        if self.inferred_annotation && self.annotated_type == Type::unknown() {
-            return None;
-        }
-
-        Some(self.annotated_type)
+        TypeContext::from(self.annotated_type).declared_type()
     }
 
     /// Returns the source definition represented by this parameter, if any.

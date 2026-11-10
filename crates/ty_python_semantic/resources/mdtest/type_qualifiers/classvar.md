@@ -43,6 +43,41 @@ c.e = 2
 c.f = 3
 ```
 
+## Inferring the type from a generic call
+
+A bare `ClassVar` lets a generic call infer its return type from the receiver. Outside the class
+body, the type includes `Unknown` because the class variable can be reassigned.
+
+```py
+from typing import ClassVar
+from ty_extensions._internal import Unknown
+
+class C:
+    header: ClassVar = bytes.fromhex("fd")
+    reveal_type(header)  # revealed: bytes
+
+    other: ClassVar[Unknown]
+    other = b""
+
+reveal_type(C.header)  # revealed: Unknown | bytes
+reveal_type(C.other)  # revealed: Unknown
+```
+
+Inside the subclass, both assignments narrow the variable to `bytes`. Reading the variable through
+the subclass uses the inherited declaration.
+
+```py
+class Child(C):
+    header = bytes.fromhex("ab")
+    reveal_type(header)  # revealed: bytes
+
+    other = bytes.fromhex("ab")
+    reveal_type(other)  # revealed: bytes
+
+reveal_type(Child.header)  # revealed: Unknown | bytes
+reveal_type(Child.other)  # revealed: Unknown
+```
+
 ## From stubs
 
 This is a regression test for a bug where we did not properly keep track of type qualifiers when

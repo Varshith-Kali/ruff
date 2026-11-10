@@ -16,7 +16,7 @@ use crate::{
     Db, FxIndexMap, FxIndexSet, TypeQualifiers,
     place::{
         ConsideredDefinitions, DefinedPlace, Definedness, Place, PlaceAndQualifiers,
-        PublicTypePolicy, RequiresExplicitReExport, TypeOrigin, place_by_id, place_from_bindings,
+        PublicTypePolicy, RequiresExplicitReExport, place_by_id, place_from_bindings,
         place_from_declarations,
     },
     reachability::{DeclarationsIteratorExtension, ReachabilityConstraintsExtension},
@@ -2797,7 +2797,7 @@ impl<'db> StaticClassLiteral<'db> {
                 default_ty =
                     default_ty.map(|ty| ty.apply_optional_specialization(db, specialization));
 
-                let declared_ty = attr_ty.apply_optional_specialization(db, specialization);
+                let mut declared_ty = attr_ty.apply_optional_specialization(db, specialization);
                 let mut init = true;
                 let mut kw_only = None;
                 let mut alias = None;
@@ -2825,6 +2825,14 @@ impl<'db> StaticClassLiteral<'db> {
                     kw_only = field.kw_only(db);
                     alias.clone_from(field.alias(db));
                     converter = field.converter(db);
+                } else if field_policy.is_dataclass_like()
+                    && result.is_qualifier_only()
+                    && attr.qualifiers.contains(TypeQualifiers::FINAL)
+                    && let Some(default_ty) = default_ty
+                {
+                    // A bare `Final` infers its type from the default value. The constructor must
+                    // accept only values compatible with the type read through the instance.
+                    declared_ty = default_ty;
                 }
 
                 let kind = match field_policy {
@@ -3039,19 +3047,20 @@ impl<'db> StaticClassLiteral<'db> {
             let use_def = use_def_map(db, body_scope);
 
             let declarations = use_def.end_of_scope_symbol_declarations(symbol_id);
-            let declared_and_qualifiers = place_from_declarations(db, env, declarations)
-                .with_imported_final(
-                    db,
-                    env,
-                    use_def.end_of_scope_imported_final_candidates(symbol_id.into()),
-                )
-                .ignore_conflicting_declarations();
+            let declarations = place_from_declarations(db, env, declarations).with_imported_final(
+                db,
+                env,
+                use_def.end_of_scope_imported_final_candidates(symbol_id.into()),
+            );
+            let qualifier_only = declarations.is_qualifier_only();
+            let declared_and_qualifiers = declarations.ignore_conflicting_declarations();
 
             match declared_and_qualifiers {
                 PlaceAndQualifiers {
                     place:
                         mut declared @ Place::Defined(DefinedPlace {
                             ty: declared_ty,
+                            origin: declared_origin,
                             definedness: declaredness,
                             provenance: declared_provenance,
                             ..
@@ -3092,6 +3101,17 @@ impl<'db> StaticClassLiteral<'db> {
                     let has_binding = !(inferred.is_undefined()
                         || self.file(db).is_stub(db) && self.has_instance_slot(db, name));
 
+                    let union_with_implicit = |implicit: DefinedPlace<'db>| Member {
+                        inner: Place::Defined(DefinedPlace {
+                            ty: UnionType::from_two_elements(db, env, declared_ty, implicit.ty),
+                            origin: declared_origin.merge(implicit.origin).as_declared(),
+                            definedness: declaredness,
+                            public_type_policy: PublicTypePolicy::Raw,
+                            provenance: implicit.provenance.or(declared_provenance),
+                        })
+                        .with_qualifiers(qualifiers),
+                    };
+
                     if has_binding {
                         // The attribute is declared and bound in the class body.
                         if declared_ty.is_function_like(db) {
@@ -3130,27 +3150,8 @@ impl<'db> StaticClassLiteral<'db> {
                                 sources.implicit_attribute(db, name, MethodDecorator::None)
                             }
                         };
-                        if let Place::Defined(DefinedPlace {
-                            ty: implicit_ty,
-                            provenance: implicit_provenance,
-                            ..
-                        }) = implicit.inner.place
-                        {
-                            Member {
-                                inner: Place::Defined(DefinedPlace {
-                                    ty: UnionType::from_two_elements(
-                                        db,
-                                        env,
-                                        declared_ty,
-                                        implicit_ty,
-                                    ),
-                                    origin: TypeOrigin::Declared,
-                                    definedness: declaredness,
-                                    public_type_policy: PublicTypePolicy::Raw,
-                                    provenance: implicit_provenance.or(declared_provenance),
-                                })
-                                .with_qualifiers(qualifiers),
-                            }
+                        if let Place::Defined(implicit) = implicit.inner.place {
+                            union_with_implicit(implicit)
                         } else if self.is_own_dataclass_instance_field(db, name)
                             && declared_ty
                                 .class_member(db, env, "__get__")
@@ -3179,45 +3180,36 @@ impl<'db> StaticClassLiteral<'db> {
                             Member::unbound()
                         }
                     } else {
+                        // A bare `Final` can be initialized in `__init__`. Its type comes from
+                        // the instance assignment, while the class declaration prevents writes.
+                        if qualifier_only && !declared.is_undefined() {
+                            let initializer = sources.final_initializer(db, name).inner.place;
+                            let place = if initializer.is_undefined() {
+                                declared
+                            } else {
+                                initializer
+                            };
+                            return Member {
+                                inner: place.with_qualifiers(qualifiers),
+                            };
+                        }
+
                         // The attribute is declared but not bound in the class body.
                         // We take this as a sign that this is intended to be a pure
                         // instance attribute, and we trust the declared type, unless
                         // it is possibly-undeclared. In the latter case, we also
                         // union with the inferred type from attribute assignments.
 
-                        if declaredness == Definedness::AlwaysDefined {
-                            Member {
-                                inner: declared.with_qualifiers(qualifiers),
-                            }
-                        } else {
-                            if let Place::Defined(DefinedPlace {
-                                ty: implicit_ty,
-                                provenance: implicit_provenance,
-                                ..
-                            }) = sources
+                        if declaredness == Definedness::PossiblyUndefined
+                            && let Place::Defined(implicit) = sources
                                 .implicit_attribute(db, name, MethodDecorator::None)
                                 .inner
                                 .place
-                            {
-                                Member {
-                                    inner: Place::Defined(DefinedPlace {
-                                        ty: UnionType::from_two_elements(
-                                            db,
-                                            env,
-                                            declared_ty,
-                                            implicit_ty,
-                                        ),
-                                        origin: TypeOrigin::Declared,
-                                        definedness: declaredness,
-                                        public_type_policy: PublicTypePolicy::Raw,
-                                        provenance: implicit_provenance.or(declared_provenance),
-                                    })
-                                    .with_qualifiers(qualifiers),
-                                }
-                            } else {
-                                Member {
-                                    inner: declared.with_qualifiers(qualifiers),
-                                }
+                        {
+                            union_with_implicit(implicit)
+                        } else {
+                            Member {
+                                inner: declared.with_qualifiers(qualifiers),
                             }
                         }
                     }

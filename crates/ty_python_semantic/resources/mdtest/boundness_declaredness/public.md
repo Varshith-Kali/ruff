@@ -226,7 +226,7 @@ class Public:
 # error: [possibly-missing-attribute]
 reveal_type(Public.a)  # revealed: int
 # error: [possibly-missing-attribute]
-reveal_type(Public.b)  # revealed: Literal[1] | Unknown
+reveal_type(Public.b)  # revealed: Unknown
 
 # External modifications of `a` are checked against the inferred type:
 #

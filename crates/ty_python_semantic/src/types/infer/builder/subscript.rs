@@ -20,7 +20,6 @@ use crate::types::diagnostic::{
 };
 use crate::types::dict::dict_literal_key_value_types;
 use crate::types::generics::{GenericContext, bind_typevar};
-use crate::types::infer::builder::annotation_expression::PEP613Policy;
 use crate::types::infer::builder::{ArgExpr, ArgumentsIter, MultiInferenceGuard};
 use crate::types::infer::{InferenceFlags, TypeExpressionFlags};
 use crate::types::special_form::AliasSpec;
@@ -34,8 +33,8 @@ use crate::types::{
     BoundTypeVarInstance, CallArguments, CallDunderError, CallableBinding, ClassType,
     CycleDetector, DisplaySettings, DynamicType, InternedType, KnownClass, KnownInstanceType,
     LintDiagnosticGuard, MemberLookupPolicy, Parameter, Parameters, SpecialFormType,
-    StaticClassLiteral, Type, TypeAliasType, TypeAndQualifiers, TypeContext, TypeMapping,
-    TypeVarBoundOrConstraints, UnionType, UnionTypeInstance,
+    StaticClassLiteral, Type, TypeAliasType, TypeContext, TypeMapping, TypeVarBoundOrConstraints,
+    UnionType, UnionTypeInstance,
 };
 use crate::{Db, FxOrderSet, ProgramEnvironment};
 use ty_python_core::definition::Definition;
@@ -322,12 +321,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     return Ok(self
                         .parse_subscription_of_annotated_special_form(
                             subscript,
-                            AnnotatedExprContext::TypeExpression,
+                            Self::infer_type_expression,
                         )
-                        .map_or(Type::unknown(), |inferred| {
+                        .map_or(Type::unknown(), |ty| {
                             Type::KnownInstance(KnownInstanceType::Annotated(InternedType::new(
-                                db,
-                                inferred.inner_type(),
+                                db, ty,
                             )))
                         }));
                 }
@@ -1204,6 +1202,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         if let Some(first_excess_type_argument_index) = first_excess_type_argument_index {
             if typevars_len == 0 {
                 // Type parameter list cannot be empty, so if we reach here, `value_ty` is not a generic type.
+                self.context.mark_invalid_type_form();
                 if let Some(builder) = self.context.report_lint(&NOT_SUBSCRIPTABLE, subscript) {
                     let mut diagnostic = builder.into_diagnostic(format_args!(
                         "Cannot subscript non-generic type `{}`",
@@ -2531,11 +2530,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     ///
     /// Return `None` if there is no first argument, so value inference can distinguish a
     /// missing type from a type that infers to `Unknown`.
-    pub(super) fn parse_subscription_of_annotated_special_form(
+    pub(super) fn parse_subscription_of_annotated_special_form<T>(
         &mut self,
         subscript: &ast::ExprSubscript,
-        subscript_context: AnnotatedExprContext,
-    ) -> Option<TypeAndQualifiers<'db>> {
+        infer_first_argument: impl FnOnce(&mut Self, &ast::Expr) -> T,
+    ) -> Option<T> {
         let slice = &*subscript.slice;
         let arguments = match slice {
             ast::Expr::Tuple(tuple) => tuple.elts.as_slice(),
@@ -2555,14 +2554,18 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             .context
             .inference_flags
             .replace(InferenceFlags::IN_TYPE_ALIAS, false);
+        // A type expression inside metadata, such as the first argument to a cast, can be
+        // invalid while the type described by this annotation is valid.
+        let previously_invalid = self.context.replace_invalid_type_form(false);
         for metadata_element in metadata {
             self.infer_expression(metadata_element, TypeContext::default());
         }
+        self.context.replace_invalid_type_form(previously_invalid);
         self.context
             .inference_flags
             .set(InferenceFlags::IN_TYPE_ALIAS, previous_in_type_alias);
 
-        Some(subscript_context.infer(self, first_argument))
+        Some(infer_first_argument(self, first_argument))
     }
 }
 
@@ -2702,27 +2705,4 @@ fn legacy_generic_class_context<'db>(
         env,
         validated_typevars,
     ))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum AnnotatedExprContext {
-    TypeExpression,
-    AnnotationExpression,
-}
-
-impl AnnotatedExprContext {
-    fn infer<'db>(
-        self,
-        builder: &mut TypeInferenceBuilder<'db, '_>,
-        argument: &ast::Expr,
-    ) -> TypeAndQualifiers<'db> {
-        match self {
-            AnnotatedExprContext::TypeExpression => {
-                TypeAndQualifiers::declared(builder.infer_type_expression(argument))
-            }
-            AnnotatedExprContext::AnnotationExpression => {
-                builder.infer_annotation_expression_impl(argument, PEP613Policy::Disallowed)
-            }
-        }
-    }
 }

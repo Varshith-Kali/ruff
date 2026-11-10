@@ -2897,8 +2897,9 @@ impl<'db, I: Iterator<Item = ClassBase<'db>>> MroLookup<'db, I> {
             };
             let use_def = use_def_map(db, scope);
             let declarations = use_def.end_of_scope_symbol_declarations(symbol);
-            let declared = place_from_declarations(db, &self.env, declarations.clone())
-                .ignore_conflicting_declarations();
+            let declared = place_from_declarations(db, &self.env, declarations.clone());
+            let qualifier_only = declared.is_qualifier_only();
+            let declared = declared.ignore_conflicting_declarations();
             let declaration = if declared.is_undefined() {
                 let mut bindings = use_def.end_of_scope_symbol_bindings(symbol);
                 let predicates = bindings.predicates();
@@ -2916,7 +2917,11 @@ impl<'db, I: Iterator<Item = ClassBase<'db>>> MroLookup<'db, I> {
                 (!declared.qualifiers.contains(TypeQualifiers::FINAL)
                     && declarations.contains_only_annotated_assignments(db))
                 .then_some(ClassBodyDeclaration {
-                    member: declared,
+                    member: if qualifier_only {
+                        Place::Undefined.with_qualifiers(declared.qualifiers)
+                    } else {
+                        declared
+                    },
                     class: base,
                 })
             };
@@ -3112,6 +3117,7 @@ impl<'db, I: Iterator<Item = ClassBase<'db>>> MroLookup<'db, I> {
         let db = self.db;
         let mut union = UnionBuilder::new(db, &self.env);
         let mut union_qualifiers = TypeQualifiers::empty();
+        let mut union_origin = TypeOrigin::Inferred;
         let mut definitely_bound_member: Option<PlaceAndQualifiers<'db>> = None;
         let mut provenance = Provenance::Unknown;
         let mut pending_augmented_bindings = Vec::new();
@@ -3131,11 +3137,8 @@ impl<'db, I: Iterator<Item = ClassBase<'db>>> MroLookup<'db, I> {
                     let member = class.own_instance_member(db, &self.env, name);
                     let definitely_declared = matches!(
                         member.inner.place,
-                        Place::Defined(DefinedPlace {
-                            origin: TypeOrigin::Declared,
-                            definedness: Definedness::AlwaysDefined,
-                            ..
-                        })
+                        Place::Defined(place) if place.is_definitely_defined()
+                            && (place.origin.is_declared() || member.qualifiers().contains(TypeQualifiers::FINAL))
                     );
                     if definitely_declared {
                         let overriding_class_default =
@@ -3174,6 +3177,7 @@ impl<'db, I: Iterator<Item = ClassBase<'db>>> MroLookup<'db, I> {
                         place:
                             Place::Defined(DefinedPlace {
                                 ty,
+                                origin,
                                 definedness: boundness,
                                 provenance: member_provenance,
                                 ..
@@ -3189,6 +3193,7 @@ impl<'db, I: Iterator<Item = ClassBase<'db>>> MroLookup<'db, I> {
                         // higher up in the MRO, and build a union of all inferred types (and
                         // possibly-declared types):
                         union = union.add(ty);
+                        union_origin = union_origin.merge(origin);
                         provenance = provenance.or(member_provenance);
 
                         // TODO: We could raise a diagnostic here if there are conflicting type
@@ -3235,6 +3240,7 @@ impl<'db, I: Iterator<Item = ClassBase<'db>>> MroLookup<'db, I> {
                             }
 
                             union = union.add(class_member_ty);
+                            union_origin = union_origin.merge(origin);
                             provenance = provenance.or(class_member_provenance);
                             union_qualifiers |= class_member.inner.qualifiers;
                         } else {
@@ -3271,7 +3277,7 @@ impl<'db, I: Iterator<Item = ClassBase<'db>>> MroLookup<'db, I> {
 
             Place::Defined(DefinedPlace {
                 ty: union.build(),
-                origin: TypeOrigin::Inferred,
+                origin: union_origin,
                 definedness: boundness,
                 public_type_policy: PublicTypePolicy::Raw,
                 provenance,

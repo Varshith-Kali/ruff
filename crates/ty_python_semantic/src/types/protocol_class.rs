@@ -18,15 +18,16 @@ use crate::types::{TypeContext, UpcastPolicy};
 use crate::{
     Db, FxOrderSet,
     place::{
-        DefinedPlace, Definedness, Place, PlaceAndQualifiers, Provenance, place_from_declarations,
+        DefinedPlace, Definedness, Place, PlaceAndQualifiers, Provenance, TypeOrigin,
+        place_from_declarations,
     },
     types::{
         ApplyTypeMappingVisitor, BindingContext, BoundTypeVarIdentity, BoundTypeVarInstance,
         CallableType, ClassBase, ClassLiteral, ClassType, ErrorContext, FindLegacyTypeVarsVisitor,
         GenericAlias, GenericContext, InstanceFallbackShadowsNonDataDescriptor, KnownFunction,
         KnownInstanceType, MaterializationKind, MemberLookupKey, MemberLookupPolicy, Parameter,
-        ProtocolInstanceType, SelfBinding, Signature, StaticClassLiteral, Type, TypeMapping,
-        TypeQualifiers, TypeVarVariance, UnionType, VarianceInferable, VarianceTerm,
+        ProtocolInstanceType, SelfBinding, Signature, StaticClassLiteral, Type, TypeAndQualifiers,
+        TypeMapping, TypeQualifiers, TypeVarVariance, UnionType, VarianceInferable, VarianceTerm,
         constraints::{ConstraintSet, IteratorConstraintsExtension, OptionConstraintsExtension},
         context::InferContext,
         diagnostic::{INVALID_PROTOCOL, report_undeclared_protocol_member},
@@ -182,6 +183,7 @@ impl<'db> ProtocolClass<'db> {
                         symbol_id,
                         ProtocolMemberCandidate {
                             ty: place.ty,
+                            origin: place.origin,
                             qualifiers: member.qualifiers,
                             definition: place.provenance.definition(),
                             self_binding_context,
@@ -200,7 +202,7 @@ impl<'db> ProtocolClass<'db> {
                     );
                 let first_declaration = place_result.first_declaration;
                 let place = place_result.ignore_conflicting_declarations();
-                if let Some(ty) = place.place.ignore_possibly_undefined() {
+                if let Place::Defined(DefinedPlace { ty, origin, .. }) = place.place {
                     let self_binding_context = ty.contains_self(db, env).then(|| {
                         if let Some(definition) = first_declaration
                             && definition.kind(db).is_function_def()
@@ -214,11 +216,13 @@ impl<'db> ProtocolClass<'db> {
                         .entry(symbol_id)
                         .and_modify(|candidate| {
                             candidate.ty = ty;
+                            candidate.origin = origin;
                             candidate.qualifiers = place.qualifiers;
                             candidate.self_binding_context = self_binding_context;
                         })
                         .or_insert(ProtocolMemberCandidate {
                             ty,
+                            origin,
                             qualifiers: place.qualifiers,
                             definition: first_declaration,
                             self_binding_context,
@@ -623,14 +627,14 @@ impl<'db> ProtocolInterfaceView<'db> {
         env: &ProgramEnvironment<'db>,
         receiver_ty: Type<'db>,
         name: &str,
-    ) -> Option<(Option<Type<'db>>, TypeQualifiers)> {
+    ) -> Option<(Option<TypeAndQualifiers<'db>>, TypeQualifiers)> {
         self.member_by_name(db, name).map(|member| {
             (
                 member
                     .access(ProtocolMemberAccessMode::Class)
                     .write()
                     .and_then(|write| write.requirement(db, env, Some(receiver_ty)))
-                    .and_then(|requirement| requirement.accepted_type()),
+                    .and_then(|requirement| requirement.accepted_target()),
                 member.qualifiers(),
             )
         })
@@ -1517,6 +1521,7 @@ impl<'a, 'db> ProtocolMemberAccess<'a, 'db> {
             ProtocolMemberKind::Property { .. } => return None,
         };
         Some(ProtocolMemberWriteAccess {
+            origin: self.declaration.origin,
             declaration: write,
             materialization: self.materialization.map(MaterializationKind::flip),
         })
@@ -1653,6 +1658,7 @@ impl<'db> ProtocolMemberReadAccess<'_, 'db> {
 /// A write operation retains the setter declaration while materializing only its accepted values.
 #[derive(Debug, Copy, Clone)]
 struct ProtocolMemberWriteAccess<'db> {
+    origin: TypeOrigin,
     declaration: ProtocolMemberWrite<'db>,
     materialization: Option<MaterializationKind>,
 }
@@ -1687,8 +1693,9 @@ impl<'db> ProtocolMemberWriteAccess<'db> {
     ) -> Option<ProtocolMemberWriteRequirement<'db>> {
         match self.declaration {
             ProtocolMemberWrite::Type(annotation) => {
+                let ty = self.resolve_value(db, env, annotation, self_type)?;
                 Some(ProtocolMemberWriteRequirement::AssignableTo(
-                    self.resolve_value(db, env, annotation, self_type)?,
+                    TypeAndQualifiers::new(ty, self.origin, TypeQualifiers::empty()),
                 ))
             }
             ProtocolMemberWrite::Descriptor { descriptor, domain } => {
@@ -1731,6 +1738,7 @@ fn cycle_normalized_optional_type<'db>(
 #[derive(Debug, PartialEq, Eq, Clone, Hash, get_size2::GetSize, salsa::SalsaValue)]
 pub(super) struct ProtocolMemberData<'db> {
     kind: ProtocolMemberKind<'db>,
+    origin: TypeOrigin,
     qualifiers: TypeQualifiers,
     definition: Option<Definition<'db>>,
 }
@@ -1751,6 +1759,7 @@ impl<'db> ProtocolMemberData<'db> {
 
         Self {
             kind: ProtocolMemberKind::Method(Type::Callable(callable), method_kind),
+            origin: TypeOrigin::Declared,
             qualifiers: TypeQualifiers::default(),
             definition,
         }
@@ -1763,6 +1772,7 @@ impl<'db> ProtocolMemberData<'db> {
     ) -> Self {
         Self {
             kind: ProtocolMemberKind::Property { read, write },
+            origin: TypeOrigin::Declared,
             qualifiers: TypeQualifiers::default(),
             definition,
         }
@@ -1774,6 +1784,7 @@ impl<'db> ProtocolMemberData<'db> {
                 ty: candidate.ty,
                 self_binding_context: candidate.self_binding_context,
             }),
+            origin: candidate.origin,
             qualifiers: candidate.qualifiers,
             definition: candidate.definition,
         }
@@ -1788,8 +1799,7 @@ impl<'db> ProtocolMemberData<'db> {
     ) -> Self {
         Self {
             kind: self.kind.cycle_normalized(db, env, previous.kind, cycle),
-            qualifiers: self.qualifiers,
-            definition: self.definition,
+            ..*self
         }
     }
 
@@ -1804,8 +1814,7 @@ impl<'db> ProtocolMemberData<'db> {
             kind: self
                 .kind
                 .recursive_type_normalized_impl(db, env, div, nested)?,
-            qualifiers: self.qualifiers,
-            definition: self.definition,
+            ..*self
         })
     }
 
@@ -1820,8 +1829,7 @@ impl<'db> ProtocolMemberData<'db> {
             kind: self
                 .kind
                 .apply_type_mapping_impl(db, type_mapping, tcx, visitor),
-            qualifiers: self.qualifiers,
-            definition: self.definition,
+            ..*self
         }
     }
 
@@ -3421,6 +3429,7 @@ impl BoundOnClass {
 #[derive(Debug, Copy, Clone)]
 struct ProtocolMemberCandidate<'db> {
     ty: Type<'db>,
+    origin: TypeOrigin,
     qualifiers: TypeQualifiers,
     definition: Option<Definition<'db>>,
     // A default's value provenance can differ from the declaration that scopes `Self`.

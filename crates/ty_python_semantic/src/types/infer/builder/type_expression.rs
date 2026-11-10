@@ -18,7 +18,6 @@ use crate::types::diagnostic::{
     report_invalid_concatenate_last_arg, report_missing_type_arguments,
     report_unsupported_binary_operation,
 };
-use crate::types::infer::builder::subscript::AnnotatedExprContext;
 use crate::types::infer::legacy_type_alias::non_alias_assignment;
 use crate::types::infer::{
     CyclicTypeAliasError, InferenceFlags, LegacyTypeAliasInference, TypeExpressionFlags,
@@ -2167,6 +2166,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                             if !self.in_string_annotation() {
                                 self.infer_expression(slice, TypeContext::default());
                             }
+                            self.context.mark_invalid_type_form();
                             if let Some(builder) =
                                 self.context.report_lint(&NOT_SUBSCRIPTABLE, subscript)
                             {
@@ -2573,9 +2573,9 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             SpecialFormType::Annotated => self
                 .parse_subscription_of_annotated_special_form(
                     subscript,
-                    AnnotatedExprContext::TypeExpression,
+                    Self::infer_type_expression,
                 )
-                .map_or(Type::unknown(), |inferred| inferred.inner_type()),
+                .unwrap_or_else(Type::unknown),
             SpecialFormType::Literal => match self.infer_literal_parameter_type(arguments_slice) {
                 Ok(ty) => ty,
                 Err(nodes) => {
@@ -3700,6 +3700,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         {
             return ty;
         }
+        self.context.mark_invalid_type_form();
         if let Some(builder) = self.context.report_lint(&UNBOUND_TYPE_VARIABLE, expression) {
             builder.into_diagnostic(format_args!(
                 "Type variable `{name}` is not bound to any outer generic context",

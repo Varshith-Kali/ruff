@@ -12,13 +12,13 @@ use ruff_python_ast::PythonVersion;
 use ruff_text_size::{Ranged, TextRange};
 use salsa::plumbing::{AsId, FromId, Id};
 
-use super::{Type, TypeCheckDiagnostics, infer_definition_types};
+use super::{DeclaredType, Type, TypeCheckDiagnostics, infer_definition_types};
 
 use crate::diagnostic::DiagnosticGuard;
 use crate::importer::Importer;
 use crate::lint::LintSource;
 use crate::reachability::is_range_reachable;
-use crate::types::diagnostic::INVALID_TYPE_FORM;
+use crate::types::diagnostic::{INVALID_TYPE_ARGUMENTS, INVALID_TYPE_FORM};
 use crate::types::function::FunctionDecorators;
 use crate::types::infer::InferenceFlags;
 use crate::{
@@ -273,6 +273,25 @@ impl<'db, 'ast> InferContext<'db, 'ast> {
         !self.diagnostics.borrow().is_empty()
     }
 
+    pub(super) fn replace_invalid_type_form(&self, invalid: bool) -> bool {
+        self.has_invalid_type_form.replace(invalid)
+    }
+
+    /// Classify this annotation using the type forms seen while inferring it, and retain any
+    /// invalid type form in the enclosing expression.
+    pub(super) fn finish_annotation(
+        &self,
+        previously_invalid: bool,
+        annotation: DeclaredType<'db>,
+    ) -> DeclaredType<'db> {
+        if self.has_invalid_type_form.get() {
+            annotation.invalid()
+        } else {
+            self.has_invalid_type_form.set(previously_invalid);
+            annotation
+        }
+    }
+
     /// Records an invalid type form even when its diagnostic is suppressed or inferred separately.
     pub(super) fn mark_invalid_type_form(&self) {
         self.has_invalid_type_form.set(true);
@@ -335,7 +354,7 @@ impl<'db, 'ast> InferContext<'db, 'ast> {
         ranged: T,
     ) -> Option<LintDiagnosticGuardBuilder<'ctx, 'db>> {
         let lint = LintId::of(lint);
-        if lint == LintId::of(&INVALID_TYPE_FORM) {
+        if lint == LintId::of(&INVALID_TYPE_FORM) || lint == LintId::of(&INVALID_TYPE_ARGUMENTS) {
             self.mark_invalid_type_form();
         }
         LintDiagnosticGuardBuilder::new(self, lint, ranged.range())

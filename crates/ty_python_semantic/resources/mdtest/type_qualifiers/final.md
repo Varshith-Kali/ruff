@@ -14,6 +14,7 @@ from another scope. Local uses of the symbol will use the inferred type, which m
 
 ```py
 from typing import Final, Annotated
+from ty_extensions._internal import Unknown
 
 FINAL_A: Final[int] = 1
 FINAL_B: Annotated[Final[int], "the annotation for FINAL_B"] = 1
@@ -21,12 +22,14 @@ FINAL_C: Final[Annotated[int, "the annotation for FINAL_C"]] = 1
 FINAL_D: "Final[int]" = 1
 FINAL_F: Final[int]
 FINAL_F = 1
+HEADER: Final[Unknown] = b""
 
 reveal_type(FINAL_A)  # revealed: Literal[1]
 reveal_type(FINAL_B)  # revealed: Literal[1]
 reveal_type(FINAL_C)  # revealed: Literal[1]
 reveal_type(FINAL_D)  # revealed: Literal[1]
 reveal_type(FINAL_D)  # revealed: Literal[1]
+reveal_type(HEADER)  # revealed: Unknown
 
 def nonlocal_uses():
     reveal_type(FINAL_A)  # revealed: int
@@ -60,8 +63,10 @@ symbol cannot be modified:
 from typing import Final
 
 FINAL_A: Final = 1
+HEADER: Final = bytes.fromhex("fd")
 
 reveal_type(FINAL_A)  # revealed: Literal[1]
+reveal_type(HEADER)  # revealed: bytes
 
 def nonlocal_uses():
     reveal_type(FINAL_A)  # revealed: Literal[1]
@@ -89,6 +94,7 @@ class C:
         self.FINAL_D: Final = 1
         self.FINAL_E: Final
         self.FINAL_E = 1
+        self.header: Final = reveal_type(bytes.fromhex("fd"))  # revealed: bytes
 
 reveal_type(C.FINAL_A)  # revealed: int
 reveal_type(C.FINAL_B)  # revealed: Literal[1]
@@ -98,6 +104,56 @@ reveal_type(C().FINAL_B)  # revealed: Literal[1]
 reveal_type(C().FINAL_C)  # revealed: int
 reveal_type(C().FINAL_D)  # revealed: Literal[1]
 reveal_type(C().FINAL_E)  # revealed: int
+```
+
+### Inferring a final attribute from its initializer
+
+A bare `Final` uses the type inferred in `__init__`. An explicit `Final[Unknown]` narrows inside
+`__init__` and exposes `Unknown` to callers.
+
+```py
+from typing import Final
+from ty_extensions._internal import Unknown
+
+class C:
+    inferred: Final
+    declared: Final[Unknown]
+
+    def __init__(self):
+        self.inferred = bytes.fromhex("fd")
+        reveal_type(self.inferred)  # revealed: bytes
+        self.declared = bytes.fromhex("fd")
+        reveal_type(self.declared)  # revealed: bytes
+
+    def reset(self):
+        self.inferred = 1  # error: [invalid-assignment]
+
+reveal_type(C().inferred)  # revealed: bytes
+reveal_type(C().declared)  # revealed: Unknown
+
+class Child(C):
+    def __init__(self):
+        self.inferred = b""  # error: [invalid-assignment]
+
+reveal_type(Child().inferred)  # revealed: bytes
+```
+
+Each branch infers its initializer independently. Copying an `Any` preserves its type even when
+another branch assigns an integer to the same attribute.
+
+```py
+from copy import copy
+from typing import Any
+
+class D:
+    value: Final
+
+    def __init__(self, flag: bool, dynamic: Any):
+        if flag:
+            self.value = copy(dynamic)
+            reveal_type(self.value)  # revealed: Any
+        else:
+            self.value = 1
 ```
 
 ### Recursive bare `Final` instance attribute
@@ -1197,9 +1253,8 @@ class Base:
         self.x: Final[int] = 1
 
 class Derived(Base):
-    # TODO: This should be an error, but instance attribute override checking is not yet supported
     def __init__(self):
-        self.x = 2
+        self.x = 2  # error: [invalid-assignment] "Cannot assign to inherited final attribute `x`"
 ```
 
 ### Private (name-mangled) members are not checked
@@ -1505,6 +1560,10 @@ from typing import Final
 
 DECLARED_THEN_BOUND: Final[int]
 DECLARED_THEN_BOUND = 1
+
+HEADER: Final
+HEADER = bytes.fromhex("fd")
+reveal_type(HEADER)  # revealed: bytes
 ```
 
 ### No assignment

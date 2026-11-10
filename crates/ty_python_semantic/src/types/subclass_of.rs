@@ -9,9 +9,9 @@ use crate::types::variance::{VarianceInferable, VarianceTerm};
 use crate::types::{
     ApplyTypeMappingVisitor, BoundTypeVarIdentity, BoundTypeVarInstance, ClassLiteral, ClassType,
     DynamicType, FindLegacyTypeVarsVisitor, IntersectionBuilder, KnownClass, MaterializationKind,
-    MemberLookupPolicy, ProtocolInstanceType, SpecialFormType, Type, TypeContext, TypeMapping,
-    TypeQualifiers, TypeRecursionContext, TypeVarBoundOrConstraints, TypedDictType, UnionBuilder,
-    todo_type,
+    MemberLookupPolicy, ProtocolInstanceType, SpecialFormType, Type, TypeAndQualifiers,
+    TypeContext, TypeMapping, TypeQualifiers, TypeRecursionContext, TypeVarBoundOrConstraints,
+    TypedDictType, UnionBuilder, todo_type,
 };
 use ty_python_core::definition::Definition;
 
@@ -159,17 +159,17 @@ impl<'db> SubclassOfType<'db> {
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
         name: &str,
-    ) -> Option<(Option<Type<'db>>, TypeQualifiers)> {
+    ) -> Option<(Option<TypeAndQualifiers<'db>>, TypeQualifiers)> {
         let SubclassOfInner::Protocol(protocol) = self.subclass_of else {
             return None;
         };
         protocol
             .interface(db)
             .meta_write_requirement(db, env, Type::ProtocolInstance(protocol), name)
-            .map(|(write_ty, mut qualifiers)| {
+            .map(|(write, mut qualifiers)| {
                 // `ClassVar` prohibits instance writes, not writes through the class object.
                 qualifiers.remove(TypeQualifiers::CLASS_VAR);
-                (write_ty, qualifiers)
+                (write, qualifiers)
             })
     }
 

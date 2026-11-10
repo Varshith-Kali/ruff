@@ -20,11 +20,12 @@ use super::relation::TypeRelationChecker;
 use super::visitor::may_contain_typevar_from;
 use super::{
     BindingContext, IntersectionType, KnownClass, KnownInstanceType, MemberLookupPolicy, Parameter,
-    PropertyInstanceType, SelfBinding, Signature, Type, TypeContext, TypeMapping, TypeQualifiers,
-    TypeVarBoundOrConstraints, UnionType, UpcastPolicy,
+    PropertyInstanceType, SelfBinding, Signature, Type, TypeAndQualifiers, TypeContext,
+    TypeMapping, TypeQualifiers, TypeVarBoundOrConstraints, UnionType, UpcastPolicy,
 };
 use crate::place::{
-    DefinedPlace, Definedness, Place, PlaceAndQualifiers, builtins_symbol, place_from_bindings,
+    DefinedPlace, Definedness, Place, PlaceAndQualifiers, TypeOrigin, builtins_symbol,
+    place_from_bindings,
 };
 use crate::{Program, ProgramEnvironment};
 
@@ -54,7 +55,7 @@ pub(super) enum AttributeWriteRequirement<'db> {
     /// A module symbol, with its declared type when the symbol is known.
     ///
     /// `None` represents an unresolved module attribute rather than an unconstrained write.
-    Module(Option<Type<'db>>),
+    Module(Option<TypeAndQualifiers<'db>>),
     /// The effective instance-write requirement of a declared protocol member.
     ///
     /// `write` is `None` for a read-only member. Qualifiers are retained so assignment inference
@@ -81,7 +82,7 @@ pub(super) enum AttributeWriteRequirement<'db> {
 /// How a writable protocol member validates an assigned value.
 pub(super) enum ProtocolMemberWriteRequirement<'db> {
     /// Check the assigned value against a directly representable write type.
-    AssignableTo(Type<'db>),
+    AssignableTo(TypeAndQualifiers<'db>),
     /// Invoke every possible descriptor setter with the assigned value.
     ///
     /// `domain` is the precisely derived write type when that domain fits in [`Type`]. A
@@ -101,9 +102,15 @@ impl<'db> ProtocolMemberWriteRequirement<'db> {
     /// Returns `None` if that type cannot be represented directly (if the protocol
     /// member is a custom descriptor whose domain cannot be represented directly).
     pub(super) fn accepted_type(&self) -> Option<Type<'db>> {
+        self.accepted_target().map(TypeAndQualifiers::inner_type)
+    }
+
+    pub(super) fn accepted_target(&self) -> Option<TypeAndQualifiers<'db>> {
         match self {
-            Self::AssignableTo(ty) => Some(*ty),
-            Self::Descriptor { domain, .. } => *domain,
+            Self::AssignableTo(target) => Some(*target),
+            Self::Descriptor { domain, .. } => domain.map(|ty| {
+                TypeAndQualifiers::new(ty, TypeOrigin::Declared, TypeQualifiers::empty())
+            }),
         }
     }
 }
@@ -244,28 +251,23 @@ pub(super) enum ExplicitAttributeWriteRequirement<'db> {
         qualifiers: TypeQualifiers,
     },
     /// Check the assigned value directly against the member's effective write type.
-    AssignableTo {
-        ty: Type<'db>,
-        qualifiers: TypeQualifiers,
-    },
+    AssignableTo(TypeAndQualifiers<'db>),
 }
 
 impl ExplicitAttributeWriteRequirement<'_> {
     pub(super) fn qualifiers(&self) -> TypeQualifiers {
         match self {
-            Self::Descriptor { qualifiers, .. } | Self::AssignableTo { qualifiers, .. } => {
-                *qualifiers
-            }
+            Self::Descriptor { qualifiers, .. } => *qualifiers,
+            Self::AssignableTo(target) => target.qualifiers(),
         }
     }
 }
 
 /// A receiver-level write target that can govern the write instead of the type member.
 pub(super) enum FallbackAttributeWriteRequirement<'db> {
-    /// Check the value against `ty`, retaining whether the declaration may be absent at runtime.
+    /// Check the value against the target type, retaining whether its declaration may be absent.
     AssignableTo {
-        ty: Type<'db>,
-        qualifiers: TypeQualifiers,
+        target: TypeAndQualifiers<'db>,
         possibly_missing: bool,
     },
     /// The fallback may exist, but lookup did not produce a usable write type.
@@ -434,7 +436,7 @@ pub(super) fn attribute_write_requirement<'db>(
                         }),
                         write: write.map(|write| match write {
                             ProtocolMemberWriteRequirement::AssignableTo(ty) => {
-                                ProtocolMemberWriteRequirement::AssignableTo(bind_self(ty))
+                                ProtocolMemberWriteRequirement::AssignableTo(ty.map_type(bind_self))
                             }
                             ProtocolMemberWriteRequirement::Descriptor {
                                 descriptor_ty,
@@ -476,9 +478,9 @@ pub(super) fn attribute_write_requirement<'db>(
             .meta_write_requirement(db, env, attribute)
             .map_or_else(
                 || class_attribute_write_requirement(db, env, object_ty, attribute),
-                |(write_ty, qualifiers)| AttributeWriteRequirement::ProtocolMember {
+                |(target, qualifiers)| AttributeWriteRequirement::ProtocolMember {
                     receiver_ty: object_ty,
-                    write: write_ty.map(ProtocolMemberWriteRequirement::AssignableTo),
+                    write: target.map(ProtocolMemberWriteRequirement::AssignableTo),
                     qualifiers,
                 },
             ),
@@ -500,7 +502,7 @@ pub(super) fn attribute_write_requirement<'db>(
                     .map_or_else(|_| Place::Undefined.into(), |member| member.member(db))
             };
             AttributeWriteRequirement::Module(match symbol.place {
-                Place::Defined(DefinedPlace { ty, .. }) => Some(ty),
+                Place::Defined(place) => Some(place.with_qualifiers(symbol.qualifiers)),
                 Place::Undefined => None,
             })
         }
@@ -553,7 +555,7 @@ fn instance_attribute_write_member_requirement<'db>(
     match type_member {
         type_member if type_member.is_class_var() => InstanceAttributeWriteMember::ClassVar,
         PlaceAndQualifiers {
-            place: Place::Defined(DefinedPlace { ty, .. }),
+            place: Place::Defined(place),
             qualifiers,
         } => {
             let member = explicit_attribute_write_requirement(
@@ -561,17 +563,16 @@ fn instance_attribute_write_member_requirement<'db>(
                 env,
                 object_ty,
                 attribute,
-                bind_attribute_self_typevars(db, env, ty, object_ty, receiver),
-                qualifiers,
+                place
+                    .with_qualifiers(qualifiers)
+                    .map_type(|ty| bind_attribute_self_typevars(db, env, ty, object_ty, receiver)),
                 receiver,
             );
 
             // Built-in classes can expose writable C-level descriptors that their stubs model as
             // plain annotations. Only a known slot layout rules out that additional storage.
-            if matches!(
-                member,
-                ExplicitAttributeWriteRequirement::AssignableTo { .. }
-            ) && ty.is_definitely_non_data_descriptor(db, env)
+            if matches!(member, ExplicitAttributeWriteRequirement::AssignableTo(_))
+                && place.ty.is_definitely_non_data_descriptor(db, env)
                 && object_ty
                     .nominal_class(db, env)
                     .and_then(|class| class.static_class_literal(db))
@@ -663,8 +664,7 @@ fn class_attribute_write_requirement<'db>(
                     env,
                     object_ty,
                     attribute,
-                    descriptor_ty,
-                    qualifiers,
+                    place.with_qualifiers(qualifiers).with_type(descriptor_ty),
                     None,
                 ),
                 fallback: receiver_fallback.map(|fallback| {
@@ -759,26 +759,22 @@ fn explicit_attribute_write_requirement<'db>(
     env: &ProgramEnvironment<'db>,
     object_ty: Type<'db>,
     attribute: &str,
-    attr_ty: Type<'db>,
-    qualifiers: TypeQualifiers,
+    target: TypeAndQualifiers<'db>,
     receiver: Option<Type<'db>>,
 ) -> ExplicitAttributeWriteRequirement<'db> {
+    let attr_ty = target.inner_type();
     if matches!(attr_ty, Type::SlotDescriptor(_))
         && let PlaceAndQualifiers {
-            place: Place::Defined(DefinedPlace { ty, .. }),
+            place: Place::Defined(place),
             qualifiers: storage_qualifiers,
         } = object_ty.instance_member(db, env, attribute)
     {
-        return ExplicitAttributeWriteRequirement::AssignableTo {
-            ty: effective_write_type(
-                db,
-                env,
-                object_ty,
-                attribute,
-                bind_attribute_self_typevars(db, env, ty, object_ty, receiver),
-            ),
-            qualifiers: qualifiers.union(storage_qualifiers),
-        };
+        let storage = place
+            .with_qualifiers(target.qualifiers().union(storage_qualifiers))
+            .map_type(|ty| bind_attribute_self_typevars(db, env, ty, object_ty, receiver));
+        return ExplicitAttributeWriteRequirement::AssignableTo(effective_write_type(
+            db, env, object_ty, attribute, storage,
+        ));
     }
 
     if let Place::Defined(_) = attr_ty
@@ -792,21 +788,19 @@ fn explicit_attribute_write_requirement<'db>(
             receiver_ty: receiver.map_or(object_ty, |receiver| {
                 IntersectionType::from_two_elements(db, env, object_ty, receiver)
             }),
-            qualifiers,
+            qualifiers: target.qualifiers(),
         }
     } else {
-        ExplicitAttributeWriteRequirement::AssignableTo {
-            ty: effective_write_type(
-                db,
-                env,
-                object_ty,
-                attribute,
-                attr_ty
-                    .method_shadowing_contract(db, env, receiver.unwrap_or(object_ty))
-                    .unwrap_or_else(|| shadowed_descriptor_write_type(db, env, attr_ty)),
-            ),
-            qualifiers,
-        }
+        let write_ty = attr_ty
+            .method_shadowing_contract(db, env, receiver.unwrap_or(object_ty))
+            .unwrap_or_else(|| shadowed_descriptor_write_type(db, env, attr_ty));
+        ExplicitAttributeWriteRequirement::AssignableTo(effective_write_type(
+            db,
+            env,
+            object_ty,
+            attribute,
+            target.with_type(write_ty),
+        ))
     }
 }
 
@@ -848,19 +842,18 @@ fn instance_fallback_write_requirement<'db>(
     receiver: Option<Type<'db>>,
 ) -> FallbackAttributeWriteRequirement<'db> {
     let PlaceAndQualifiers {
-        place: Place::Defined(DefinedPlace {
-            ty, definedness, ..
-        }),
+        place: Place::Defined(place),
         qualifiers,
     } = fallback
     else {
         return FallbackAttributeWriteRequirement::PossiblyMissing;
     };
-    let ty = bind_attribute_self_typevars(db, env, ty, object_ty, receiver);
+    let target = place
+        .with_qualifiers(qualifiers)
+        .map_type(|ty| bind_attribute_self_typevars(db, env, ty, object_ty, receiver));
     FallbackAttributeWriteRequirement::AssignableTo {
-        ty: effective_write_type(db, env, object_ty, attribute, ty),
-        qualifiers,
-        possibly_missing: definedness == Definedness::PossiblyUndefined,
+        target: effective_write_type(db, env, object_ty, attribute, target),
+        possibly_missing: place.definedness == Definedness::PossiblyUndefined,
     }
 }
 
@@ -911,15 +904,13 @@ fn class_fallback_write_requirement<'db>(
     fallback: PlaceAndQualifiers<'db>,
 ) -> FallbackAttributeWriteRequirement<'db> {
     let PlaceAndQualifiers {
-        place: Place::Defined(DefinedPlace {
-            ty, definedness, ..
-        }),
+        place: Place::Defined(place),
         qualifiers,
     } = fallback
     else {
         return FallbackAttributeWriteRequirement::PossiblyMissing;
     };
-    let ty = ty.bind_self_typevars(db, env, class_attr_self_ty);
+    let ty = place.ty.bind_self_typevars(db, env, class_attr_self_ty);
     let ty = if matches!(object_ty, Type::ClassLiteral(_))
         && let Type::FunctionLiteral(function) = ty
         && function.callable_type_kind(db) == CallableTypeKind::FunctionLike
@@ -929,9 +920,8 @@ fn class_fallback_write_requirement<'db>(
         ty
     };
     FallbackAttributeWriteRequirement::AssignableTo {
-        ty,
-        qualifiers,
-        possibly_missing: definedness == Definedness::PossiblyUndefined,
+        target: place.with_qualifiers(qualifiers).with_type(ty),
+        possibly_missing: place.definedness == Definedness::PossiblyUndefined,
     }
 }
 
@@ -945,16 +935,16 @@ fn effective_write_type<'db>(
     env: &ProgramEnvironment<'db>,
     object_ty: Type<'db>,
     attribute: &str,
-    attr_ty: Type<'db>,
-) -> Type<'db> {
+    target: TypeAndQualifiers<'db>,
+) -> TypeAndQualifiers<'db> {
     if let Type::NominalInstance(instance) = object_ty
         && let Some(converter_ty) = instance
             .class(db, env)
             .converter_input_type_for_field(db, attribute)
     {
-        converter_ty
+        TypeAndQualifiers::new(converter_ty, TypeOrigin::Declared, target.qualifiers())
     } else {
-        attr_ty
+        target
     }
 }
 
@@ -1490,12 +1480,12 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             AttributeWriteRequirement::Unconstrained => self.always(),
             AttributeWriteRequirement::CannotAssign => self.never(),
             AttributeWriteRequirement::Module(Some(write_ty)) => {
-                self.check_type_pair(db, value_ty, *write_ty)
+                self.check_type_pair(db, value_ty, write_ty.inner_type())
             }
             AttributeWriteRequirement::ProtocolMember {
                 write: Some(ProtocolMemberWriteRequirement::AssignableTo(write_ty)),
                 ..
-            } => self.check_type_pair(db, value_ty, *write_ty),
+            } => self.check_type_pair(db, value_ty, write_ty.inner_type()),
             AttributeWriteRequirement::ProtocolMember {
                 write: Some(ProtocolMemberWriteRequirement::Descriptor { domain, .. }),
                 ..
@@ -1635,8 +1625,8 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                 }
                 self.check_descriptor_attribute_write(db, *descriptor_ty, *receiver_ty, value_ty)
             }
-            ExplicitAttributeWriteRequirement::AssignableTo { ty, .. } => {
-                self.check_type_pair(db, value_ty, *ty)
+            ExplicitAttributeWriteRequirement::AssignableTo(target) => {
+                self.check_type_pair(db, value_ty, target.inner_type())
             }
         }
     }
@@ -1745,11 +1735,11 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         value_ty: Type<'db>,
     ) -> ConstraintSet<'db, 'c> {
         match requirement {
-            FallbackAttributeWriteRequirement::AssignableTo { ty, qualifiers, .. } => {
-                if qualifiers.contains(TypeQualifiers::FINAL) {
+            FallbackAttributeWriteRequirement::AssignableTo { target, .. } => {
+                if target.qualifiers().contains(TypeQualifiers::FINAL) {
                     self.never()
                 } else {
-                    self.check_type_pair(db, value_ty, *ty)
+                    self.check_type_pair(db, value_ty, target.inner_type())
                 }
             }
             FallbackAttributeWriteRequirement::PossiblyMissing => self.always(),

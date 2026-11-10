@@ -150,6 +150,121 @@ reveal_type(v4)  # revealed: list[int]
 invalid: list[str] = returns_list_int()
 ```
 
+## Inferring assignments with invalid annotations
+
+An invalid type expression leaves the initializer to determine the binding's type, whether the
+declaration and assignment are together or separate.
+
+```py
+header: 42 = bytes.fromhex("fd")  # error: [invalid-type-form]
+reveal_type(header)  # revealed: bytes
+
+items: list[42]  # error: [invalid-type-form]
+items = [1]
+reveal_type(items)  # revealed: list[int]
+
+words: list[int, str] = ["word"]  # ty: ignore[invalid-type-arguments]
+reveal_type(words)  # revealed: list[str]
+```
+
+Some annotations are only valid in certain positions. `ClassVar` belongs in a class body, and
+`P.args` can annotate the `*args` of a function.
+
+```py
+from typing import ClassVar, ParamSpec, TypeVar
+
+chunks: ClassVar[list[bytes]] = []  # error: [invalid-type-form]
+reveal_type(chunks)  # revealed: list[Unknown]
+
+P = ParamSpec("P")
+args: P.args = 1  # error: [invalid-paramspec]
+reveal_type(args)  # revealed: Literal[1]
+
+T = TypeVar("T")
+xs: list[T] = [1]  # error: [unbound-type-variable]
+reveal_type(xs)  # revealed: list[int]
+```
+
+Ty uses the valid parts of an annotation to check assignments and determine the public type of an
+attribute.
+
+```py
+class C:
+    def __init__(self):
+        # error: [invalid-type-form]
+        self.items: list[42] = reveal_type([1])  # revealed: list[int]
+
+    def reset(self):
+        self.items = [1]
+        reveal_type(self.items)  # revealed: list[int]
+
+reveal_type(C().items)  # revealed: list[Unknown]
+
+# error: [invalid-type-form]
+# error: [invalid-assignment]
+invalid: list[42] = 1
+reveal_type(invalid)  # revealed: Literal[1]
+```
+
+An attribute write also checks the independently inferred value against the recovered type.
+
+```py
+class Table:
+    entries: dict[str, 42]  # error: [invalid-type-form]
+
+def replace(table: Table):
+    # error: [invalid-assignment] "Object of type `dict[int, int]`"
+    table.entries = {1: 2}
+
+# error: [invalid-assignment] "Object of type `dict[int, int]`"
+Table.entries = reveal_type({1: 2})  # revealed: dict[int, int]
+```
+
+The first argument of `Annotated` supplies the declared type even when its metadata contains an
+invalid type expression.
+
+```py
+from typing import Annotated, Any, cast
+
+value: Annotated[Any, cast(42, 1)] = 2  # error: [invalid-type-form]
+reveal_type(value)  # revealed: Any
+```
+
+An unresolved name in an otherwise valid type expression declares `Unknown`. A collection annotation
+containing that name can still supply type context for the collection.
+
+```py
+# error: [unresolved-reference]
+unresolved: Missing = reveal_type(bytes.fromhex("fd"))  # revealed: bytes
+reveal_type(unresolved)  # revealed: Unknown
+
+# error: [unresolved-reference]
+partial: list[Missing] = reveal_type([1])  # revealed: list[Unknown]
+```
+
+## Writing to a conditionally declared module attribute
+
+An invalid annotation on one branch supplies no context for writes from another module.
+
+`config.py`:
+
+```py
+def flag() -> bool:
+    return True
+
+if flag():
+    entries: dict[str, 42]  # error: [invalid-type-form]
+entries = {}
+```
+
+`main.py`:
+
+```py
+import config
+
+config.entries = reveal_type({1: 2})  # revealed: dict[int, int]
+```
+
 ## PEP-604 annotations are supported
 
 ```py

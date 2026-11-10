@@ -125,5 +125,6 @@ pub(crate) fn parse_string_annotation(
         builder.into_diagnostic("Type expressions cannot span multiple string literals");
     }
 
+    context.mark_invalid_type_form();
     None
 }

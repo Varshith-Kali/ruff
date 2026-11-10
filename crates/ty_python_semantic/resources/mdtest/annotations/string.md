@@ -339,6 +339,9 @@ reveal_type(c)  # revealed: Literal[1]
 reveal_type(d)  # revealed: Foo
 reveal_type(e)  # revealed: Foo
 reveal_type(f)  # revealed: Literal[1]
+
+header: "list[" = bytes.fromhex("fd")  # error: [invalid-syntax-in-forward-annotation]
+reveal_type(header)  # revealed: bytes
 ```
 
 ```snapshot

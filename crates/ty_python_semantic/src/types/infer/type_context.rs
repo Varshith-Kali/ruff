@@ -41,19 +41,19 @@ pub(crate) struct TypeContext<'db> {
 
 impl<'db> TypeContext<'db> {
     pub(in crate::types) fn new(declared_type: Option<Type<'db>>, kind: TypeContextKind) -> Self {
-        // During generic call argument inference, type variables that cannot yet be specialized are
-        // replaced by `UnspecializedTypeVar`. This marker intentionally carries neither type-variable
-        // identity nor a concrete expected type, and so it should not be treated as a useful constraint.
-        //
-        // This deliberately matches only the bare marker: a partially specialized context such as
-        // `list[UnspecializedTypeVar | int]` still carries useful structure and concrete type
-        // information.
-        let declared_type =
-            declared_type.filter(|ty| *ty != Type::Dynamic(DynamicType::UnspecializedTypeVar));
-
-        Self {
-            declared_type,
-            kind,
+        // A bare `Unknown` supplies no information for inferring this expression. The same
+        // applies to `UnspecializedTypeVar`, which has no type-variable identity during generic
+        // call inference. A context such as `list[Unknown]` still constrains the outer type,
+        // and an explicit `Any` can express a preference for `Any`.
+        match declared_type {
+            None
+            | Some(Type::Dynamic(DynamicType::Unknown | DynamicType::UnspecializedTypeVar)) => {
+                Self::default()
+            }
+            Some(_) => Self {
+                declared_type,
+                kind,
+            },
         }
     }
 

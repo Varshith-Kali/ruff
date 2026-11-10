@@ -831,11 +831,13 @@ def forwarded[T](x: T, cond: bool) -> T | list[T]:
     return x if cond else [x]
 ```
 
-## Missing annotations do not supply declared type context
+## Missing annotations and `Unknown` as type context
 
-A missing annotation does not supply type context for a return or argument expression:
+A parameter or return type of `Unknown` leaves a generic call to infer its return type from its
+arguments, as does an omitted annotation. An explicit `Any` can guide inference.
 
 ```py
+from typing import Any
 from ty_extensions._internal import Unknown
 
 def identity[T](x: T) -> T:
@@ -845,10 +847,31 @@ def unannotated(x):
     return reveal_type(identity(1))  # revealed: Literal[1]
 
 def annotated(x: Unknown) -> Unknown:
-    return reveal_type(identity(1))  # revealed: Unknown
+    return reveal_type(identity(1))  # revealed: Literal[1]
+
+def takes_any(x: Any): ...
 
 unannotated(reveal_type(identity(1)))  # revealed: Literal[1]
-annotated(reveal_type(identity(1)))  # revealed: Unknown
+annotated(reveal_type(identity(1)))  # revealed: Literal[1]
+takes_any(reveal_type(identity(1)))  # revealed: Any
+```
+
+Calling a value with an unknown signature leaves its argument expressions to infer their own types.
+
+```py
+def call(sink):
+    sink(reveal_type(identity(1)))  # revealed: Literal[1]
+```
+
+A generator with no return annotation infers the operands of `yield` and `yield from` independently.
+
+```py
+def singleton[T](x: T) -> list[T]:
+    return [x]
+
+def values():
+    yield reveal_type(identity(1))  # revealed: Literal[1]
+    yield from reveal_type(singleton(1))  # revealed: list[int]
 ```
 
 ## Upper-bound type context
@@ -1392,6 +1415,7 @@ inferred solution.
 
 ```py
 from typing import Any, reveal_type
+from ty_extensions._internal import Unknown
 
 def identity[T](value: T) -> T:
     return value
@@ -1405,6 +1429,9 @@ def _(dynamic: Any, number: int):
 
     x2: int = reveal_type(identity(dynamic))  # revealed: int
     reveal_type(x2)  # revealed: int
+
+    x3: Unknown = reveal_type(identity(1))  # revealed: Literal[1]
+    reveal_type(x3)  # revealed: Unknown
 ```
 
 Otherwise, the inferred solution is preferred, if it is compatible with the declared constraints:
