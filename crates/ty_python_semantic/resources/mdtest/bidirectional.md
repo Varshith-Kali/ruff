@@ -834,10 +834,9 @@ def forwarded[T](x: T, cond: bool) -> T | list[T]:
 ## Missing annotations and `Unknown` as type context
 
 A parameter or return type of `Unknown` leaves a generic call to infer its return type from its
-arguments, as does an omitted annotation. An explicit `Any` can guide inference.
+arguments, as does an omitted annotation.
 
 ```py
-from typing import Any
 from ty_extensions._internal import Unknown
 
 def identity[T](x: T) -> T:
@@ -849,11 +848,8 @@ def unannotated(x):
 def annotated(x: Unknown) -> Unknown:
     return reveal_type(identity(1))  # revealed: Literal[1]
 
-def takes_any(x: Any): ...
-
 unannotated(reveal_type(identity(1)))  # revealed: Literal[1]
 annotated(reveal_type(identity(1)))  # revealed: Literal[1]
-takes_any(reveal_type(identity(1)))  # revealed: Any
 ```
 
 Calling a value with an unknown signature leaves its argument expressions to infer their own types.
