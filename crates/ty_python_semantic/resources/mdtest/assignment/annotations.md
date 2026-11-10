@@ -185,25 +185,26 @@ xs: list[T] = [1]  # error: [unbound-type-variable]
 reveal_type(xs)  # revealed: list[int]
 ```
 
-Ty uses the valid parts of an annotation to check assignments and determine the public type of an
-attribute.
+The outer `list` is still known. Ty diagnoses an incompatible initializer and keeps the type of the
+value assigned to the local name.
 
 ```py
-class C:
-    def __init__(self):
-        # error: [invalid-type-form]
-        self.items: list[42] = reveal_type([1])  # revealed: list[int]
-
-    def reset(self):
-        self.items = [1]
-        reveal_type(self.items)  # revealed: list[int]
-
-reveal_type(C().items)  # revealed: list[Unknown]
-
 # error: [invalid-type-form]
 # error: [invalid-assignment]
 invalid: list[42] = 1
 reveal_type(invalid)  # revealed: Literal[1]
+```
+
+Immediately after an attribute assignment, ty knows the list's element type from the value. Callers
+see the recovered annotation, whose element type is unknown.
+
+```py
+class C:
+    def __init__(self):
+        self.items: list[42] = [1]  # error: [invalid-type-form]
+        reveal_type(self.items)  # revealed: list[int]
+
+reveal_type(C().items)  # revealed: list[Unknown]
 ```
 
 An attribute write also checks the independently inferred value against the recovered type.
